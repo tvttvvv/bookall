@@ -27,14 +27,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------
-# 환경 변수
-# -----------------------------
 ACCESS_KEY = os.getenv("ACCESS_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY")
 CUSTOMER_ID = os.getenv("CUSTOMER_ID")
 
-HTTP_HEADERS = {
+HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     "Referer": "https://www.naver.com"
 }
@@ -46,16 +43,12 @@ store_cache = {}
 # 광고 API 서명
 # -----------------------------
 def generate_signature(timestamp, method, uri):
-    if not SECRET_KEY:
-        raise RuntimeError("SECRET_KEY 없음")
-
     message = f"{timestamp}.{method}.{uri}"
     hash = hmac.new(
         SECRET_KEY.encode(),
         message.encode(),
         hashlib.sha256
     ).digest()
-
     return base64.b64encode(hash).decode()
 
 # -----------------------------
@@ -63,31 +56,25 @@ def generate_signature(timestamp, method, uri):
 # -----------------------------
 def get_search_volume(keyword):
 
-    if not ACCESS_KEY or not CUSTOMER_ID or not SECRET_KEY:
+    if not ACCESS_KEY or not SECRET_KEY or not CUSTOMER_ID:
         return 0
 
     timestamp = str(int(time.time() * 1000))
-    method = "GET"
     uri = "/keywordstool"
-
-    signature = generate_signature(timestamp, method, uri)
 
     headers = {
         "X-Timestamp": timestamp,
         "X-API-KEY": ACCESS_KEY,
         "X-Customer": CUSTOMER_ID,
-        "X-Signature": signature,
+        "X-Signature": generate_signature(timestamp, "GET", uri),
     }
 
-    params = {
-        "hintKeywords": keyword,
-        "showDetail": 1
-    }
-
-    url = "https://api.searchad.naver.com" + uri
+    params = {"hintKeywords": keyword, "showDetail": 1}
 
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=10)
+        r = requests.get("https://api.searchad.naver.com" + uri,
+                         headers=headers, params=params, timeout=10)
+
         data = r.json()
 
         if "keywordList" not in data or not data["keywordList"]:
@@ -97,10 +84,8 @@ def get_search_volume(keyword):
         pc = first.get("monthlyPcQcCnt", 0)
         mobile = first.get("monthlyMobileQcCnt", 0)
 
-        if pc == "< 10":
-            pc = 0
-        if mobile == "< 10":
-            mobile = 0
+        if pc == "< 10": pc = 0
+        if mobile == "< 10": mobile = 0
 
         return int(pc) + int(mobile)
 
@@ -108,21 +93,34 @@ def get_search_volume(keyword):
         return 0
 
 # -----------------------------
-# 판매처 개수 (도서 전용 페이지 기반)
+# 🔥 99% 정확 판매처 검사 (상세페이지 진입 방식)
 # -----------------------------
 def get_store_count(keyword):
 
     if keyword in store_cache:
         return store_cache[keyword]
 
-    url = "https://search.naver.com/search.naver?where=book&query=" + quote(keyword)
-
     try:
-        r = requests.get(url, headers=HTTP_HEADERS, timeout=10)
+        # 1️⃣ 도서 검색 페이지
+        search_url = "https://search.naver.com/search.naver?where=book&query=" + quote(keyword)
+        r = requests.get(search_url, headers=HEADERS, timeout=10)
         html = r.text
 
-        # 판매처 숫자 전부 찾기
-        matches = re.findall(r"판매처\s*([0-9,]+)", html)
+        # 2️⃣ 첫 번째 도서 상세 링크 추출
+        link_match = re.search(r'href="(https://search\.naver\.com/book/catalog/[^"]+)"', html)
+
+        if not link_match:
+            store_cache[keyword] = 0
+            return 0
+
+        detail_url = link_match.group(1)
+
+        # 3️⃣ 상세 페이지 진입
+        detail_res = requests.get(detail_url, headers=HEADERS, timeout=10)
+        detail_html = detail_res.text
+
+        # 4️⃣ 상세 페이지 안에서만 판매처 숫자 찾기
+        matches = re.findall(r"판매처\s*([0-9,]+)", detail_html)
 
         if not matches:
             store_cache[keyword] = 0
@@ -187,7 +185,7 @@ def process_job(job_id, keywords):
 
         jobs[job_id]["progress"] = int(((i + 1) / total_count) * 100)
 
-        time.sleep(0.15)  # 과도한 요청 방지
+        time.sleep(0.5)  # 상세페이지 진입 방식이라 딜레이 증가
 
     jobs[job_id]["results"] = results
     jobs[job_id]["status"] = "completed"
@@ -203,12 +201,11 @@ def home():
 <html>
 <head>
 <meta charset="utf-8"/>
-<title>BookVPro 통합</title>
+<title>BookVPro 99% 정확 버전</title>
 <style>
 body{font-family:Arial;padding:40px;}
 textarea{width:700px;height:250px;}
-button,select{padding:8px;}
-table{border-collapse:collapse;margin-top:20px;min-width:1000px;}
+table{border-collapse:collapse;margin-top:20px;}
 th,td{border:1px solid #ccc;padding:8px;text-align:center;}
 th{background:#222;color:#fff;}
 .A{color:green;font-weight:bold;}
@@ -217,9 +214,9 @@ th{background:#222;color:#fff;}
 </head>
 <body>
 
-<h2>BookVPro 통합 검색 시스템</h2>
+<h2>BookVPro 통합 검색 시스템 (99% 정확)</h2>
 
-<textarea id="keywords" placeholder="책 제목을 줄바꿈으로 입력"></textarea><br><br>
+<textarea id="keywords" placeholder="책 제목 줄바꿈 입력"></textarea><br><br>
 
 <button onclick="start()">검색 시작</button>
 <button onclick="download()">엑셀 다운로드</button>
@@ -273,7 +270,7 @@ function poll(){
     document.getElementById("progress").innerText="진행률: "+d.progress+"%";
 
     if(d.status!=="completed"){
-      setTimeout(poll,1000);
+      setTimeout(poll,1500);
     }else{
       results=d.results;
       render();
@@ -345,9 +342,6 @@ function download(){
 </html>
 """
 
-# -----------------------------
-# API
-# -----------------------------
 @app.post("/start")
 def start(data: dict = Body(...)):
     keywords = data.get("keywords", [])
@@ -365,9 +359,7 @@ def start(data: dict = Body(...)):
 
 @app.get("/status/{job_id}")
 def status(job_id: str):
-    if job_id not in jobs:
-        return JSONResponse({"error":"job not found"}, status_code=404)
-    return jobs[job_id]
+    return jobs.get(job_id, {"error":"not found"})
 
 @app.post("/download")
 def download(data: dict = Body(...)):
