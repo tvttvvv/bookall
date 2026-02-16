@@ -15,7 +15,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
-
 from playwright.sync_api import sync_playwright
 
 load_dotenv()
@@ -35,9 +34,9 @@ CUSTOMER_ID = os.getenv("CUSTOMER_ID")
 
 jobs = {}
 
-# -----------------------------
+# -------------------------------------------------
 # 광고 API 서명
-# -----------------------------
+# -------------------------------------------------
 def generate_signature(timestamp, method, uri):
     message = f"{timestamp}.{method}.{uri}"
     hash = hmac.new(
@@ -47,9 +46,9 @@ def generate_signature(timestamp, method, uri):
     ).digest()
     return base64.b64encode(hash).decode()
 
-# -----------------------------
+# -------------------------------------------------
 # 검색량 (총합)
-# -----------------------------
+# -------------------------------------------------
 def get_search_volume(keyword):
 
     if not ACCESS_KEY or not SECRET_KEY or not CUSTOMER_ID:
@@ -91,106 +90,87 @@ def get_search_volume(keyword):
     except:
         return 0
 
+# -------------------------------------------------
+# 판매처 검사 (브라우저 1회 실행 최적화)
+# -------------------------------------------------
+def get_store_counts_bulk(keywords):
 
-# -----------------------------
-# 🔥 판매처 검사 (안전 최종판)
-# -----------------------------
-def get_store_count(keyword):
+    results = {}
 
-    url = "https://search.naver.com/search.naver?where=book&query=" + quote(keyword)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
 
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(url, timeout=30000)
+        for keyword in keywords:
+            url = "https://search.naver.com/search.naver?where=book&query=" + quote(keyword)
 
-            # JS 완전 로딩 대기
-            page.wait_for_timeout(3000)
+            try:
+                page.goto(url, timeout=30000)
+                page.wait_for_timeout(2500)
 
-            html = page.content()
-            browser.close()
+                html = page.content()
 
-        # 🔥 판매처 단어 존재 여부 먼저 확인
-        if "판매처" not in html:
-            return 0
+                if "판매처" not in html:
+                    results[keyword] = 0
+                    continue
 
-        # 🔥 숫자 포함된 판매처 패턴 완전 대응
-        matches = re.findall(
-            r"(?:도서\s*)?판매처\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)",
-            html
-        )
+                matches = re.findall(
+                    r"(?:도서\s*)?판매처\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)",
+                    html
+                )
 
-        if matches:
-            numbers = []
-            for m in matches:
-                try:
-                    numbers.append(int(m.replace(",", "")))
-                except:
-                    pass
+                if matches:
+                    numbers = [int(m.replace(",", "")) for m in matches]
+                    results[keyword] = max(numbers)
+                else:
+                    results[keyword] = 1
 
-            if numbers:
-                return max(numbers)
+            except:
+                results[keyword] = 1
 
-        # 판매처는 있는데 숫자 못 잡았으면 안전하게 B
-        return 1
+            time.sleep(1)
 
-    except:
-        # 에러 시 안전하게 B
-        return 1
+        browser.close()
 
+    return results
 
-# -----------------------------
-# 1건 처리
-# -----------------------------
-def build_row(keyword):
-
-    total = get_search_volume(keyword)
-    store_count = get_store_count(keyword)
-
-    grade = "B" if store_count > 0 else "A"
-
-    return {
-        "title": keyword,
-        "total": total,
-        "storeCount": store_count,
-        "grade": grade,
-        "link": "https://search.naver.com/search.naver?where=book&query=" + quote(keyword)
-    }
-
-
-# -----------------------------
+# -------------------------------------------------
 # Job 처리
-# -----------------------------
+# -------------------------------------------------
 def process_job(job_id, keywords):
-
-    results = []
-    total_count = len(keywords)
 
     jobs[job_id]["status"] = "running"
     jobs[job_id]["progress"] = 0
 
+    store_map = get_store_counts_bulk(keywords)
+
+    results = []
+    total_count = len(keywords)
+
     for i, kw in enumerate(keywords):
 
-        kw = kw.strip()
-        if not kw:
-            continue
+        total = get_search_volume(kw)
+        store_count = store_map.get(kw, 1)
+        grade = "B" if store_count > 0 else "A"
 
-        row = build_row(kw)
-        results.append(row)
+        results.append({
+            "title": kw,
+            "total": total,
+            "storeCount": store_count,
+            "grade": grade,
+            "link": "https://search.naver.com/search.naver?where=book&query=" + quote(kw)
+        })
 
         jobs[job_id]["progress"] = int(((i + 1) / total_count) * 100)
-
-        time.sleep(1)  # 서버 보호
+        time.sleep(1)
 
     jobs[job_id]["results"] = results
     jobs[job_id]["status"] = "completed"
     jobs[job_id]["progress"] = 100
 
-
-# -----------------------------
+# -------------------------------------------------
 # UI
-# -----------------------------
+# -------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
@@ -198,7 +178,7 @@ def home():
 <html>
 <head>
 <meta charset="utf-8"/>
-<title>BookVPro 최종 안정판</title>
+<title>BookAll 통합 시스템</title>
 <style>
 body{font-family:Arial;padding:40px;}
 textarea{width:700px;height:250px;}
@@ -211,9 +191,16 @@ th{background:#222;color:#fff;}
 </head>
 <body>
 
-<h2>BookVPro 통합 검색 시스템 (최종 안정판)</h2>
+<h2>BookAll 통합 검색 시스템</h2>
 
 <textarea id="keywords" placeholder="책 제목 줄바꿈 입력"></textarea><br><br>
+
+<select id="sort" onchange="render()">
+<option value="original">원본</option>
+<option value="high">검색량 높은순</option>
+<option value="low">검색량 낮은순</option>
+<option value="A">A 우선</option>
+</select>
 
 <button onclick="start()">검색 시작</button>
 <button onclick="download()">엑셀 다운로드</button>
@@ -233,10 +220,13 @@ th{background:#222;color:#fff;}
 <script>
 let jobId=null;
 let results=[];
+let original=[];
 
 function start(){
   let lines=document.getElementById("keywords").value
     .split("\\n").filter(x=>x.trim()!=="");
+
+  original=[...lines];
 
   fetch("/start",{
     method:"POST",
@@ -266,6 +256,20 @@ function poll(){
 }
 
 function render(){
+
+  let sort=document.getElementById("sort").value;
+  let data=[...results];
+
+  if(sort==="high"){
+    data.sort((a,b)=>b.total-a.total);
+  }
+  else if(sort==="low"){
+    data.sort((a,b)=>a.total-b.total);
+  }
+  else if(sort==="A"){
+    data.sort((a,b)=>a.grade.localeCompare(b.grade));
+  }
+
   let table=document.getElementById("table");
   table.innerHTML=`
   <tr>
@@ -276,7 +280,7 @@ function render(){
   <th>링크</th>
   </tr>`;
 
-  results.forEach(r=>{
+  data.forEach(r=>{
     table.innerHTML+=`
     <tr>
     <td>${r.title}</td>
