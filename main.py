@@ -15,7 +15,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
-
 from playwright.sync_api import sync_playwright
 
 load_dotenv()
@@ -37,7 +36,7 @@ jobs_lock = threading.Lock()
 
 
 # ============================
-# 광고 API (검색량 정확값)
+# 검색량 API
 # ============================
 def generate_signature(timestamp, method, uri):
     message = f"{timestamp}.{method}.{uri}"
@@ -50,23 +49,22 @@ def generate_signature(timestamp, method, uri):
 
 
 def get_search_volume(keyword):
-
-    if not ACCESS_KEY:
-        return 0
-
-    timestamp = str(int(time.time() * 1000))
-    uri = "/keywordstool"
-
-    headers = {
-        "X-Timestamp": timestamp,
-        "X-API-KEY": ACCESS_KEY,
-        "X-Customer": CUSTOMER_ID,
-        "X-Signature": generate_signature(timestamp, "GET", uri),
-    }
-
-    params = {"hintKeywords": keyword, "showDetail": 1}
-
     try:
+        if not ACCESS_KEY:
+            return 0
+
+        timestamp = str(int(time.time() * 1000))
+        uri = "/keywordstool"
+
+        headers = {
+            "X-Timestamp": timestamp,
+            "X-API-KEY": ACCESS_KEY,
+            "X-Customer": CUSTOMER_ID,
+            "X-Signature": generate_signature(timestamp, "GET", uri),
+        }
+
+        params = {"hintKeywords": keyword, "showDetail": 1}
+
         r = requests.get(
             "https://api.searchad.naver.com" + uri,
             headers=headers,
@@ -86,20 +84,19 @@ def get_search_volume(keyword):
         if mobile == "< 10": mobile = 0
 
         return int(pc) + int(mobile)
-
     except:
         return 0
 
 
 # ============================
-# 판매처 정확 추출
+# 판매처 추출 (정확)
 # ============================
 def extract_store_count(html):
 
     if not html:
-        return 1
+        return 0
 
-    # 검색결과 없음 체크
+    # 검색결과 없음 → A
     if "검색결과가 없습니다" in html:
         return 0
 
@@ -119,91 +116,84 @@ def extract_store_count(html):
     if numbers:
         return max(numbers)
 
-    # 대표 카드 체크
-    if "도서 더보기" in html or "네이버 도서" in html:
+    # 대표카드 강력 조건
+    rep_markers = [
+        "출판사 서평",
+        "네이버는 상품판매의 당사자가 아닙니다",
+        "도서 더보기"
+    ]
+
+    rep_count = sum(1 for m in rep_markers if m in html)
+    if rep_count >= 2:
         return 1
 
-    # 기본 B
-    return 1
+    return 0
 
 
 # ============================
-# 판매처 bulk (브라우저 1회 실행)
-# ============================
-def get_store_counts_bulk(keywords):
-
-    results = {}
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-
-        for kw in keywords:
-
-            url = f"https://search.naver.com/search.naver?where=book&query={quote(kw)}"
-
-            try:
-                page.goto(url, timeout=30000, wait_until="networkidle")
-                page.wait_for_timeout(1500)
-                html = page.content()
-
-                results[kw] = extract_store_count(html)
-
-            except:
-                results[kw] = 1
-
-            time.sleep(0.5)
-
-        browser.close()
-
-    return results
-
-
-# ============================
-# Job 처리
+# Job 처리 (진행률 + 남은시간 정확)
 # ============================
 def process_job(job_id, keywords):
 
     start_time = time.time()
+    total_count = len(keywords)
 
     with jobs_lock:
         jobs[job_id]["status"] = "running"
         jobs[job_id]["progress"] = 0
         jobs[job_id]["remaining"] = 0
+        jobs[job_id]["current"] = ""
         jobs[job_id]["results"] = []
 
-    store_map = get_store_counts_bulk(keywords)
-
     results = []
-    total_count = len(keywords)
 
-    for i, kw in enumerate(keywords):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
 
-        total = get_search_volume(kw)
-        store_count = store_map.get(kw, 1)
-        grade = "A" if store_count == 0 else "B"
+        for i, kw in enumerate(keywords):
 
-        results.append({
-            "title": kw,
-            "total": total,
-            "storeCount": store_count,
-            "grade": grade,
-            "link": f"https://search.naver.com/search.naver?where=book&query={quote(kw)}"
-        })
+            with jobs_lock:
+                jobs[job_id]["current"] = kw
 
-        elapsed = time.time() - start_time
-        avg = elapsed / (i + 1)
-        remaining = int(avg * (total_count - (i + 1)))
+            url = f"https://search.naver.com/search.naver?where=book&query={quote(kw)}"
 
-        with jobs_lock:
-            jobs[job_id]["progress"] = int(((i + 1) / total_count) * 100)
-            jobs[job_id]["remaining"] = remaining
-            jobs[job_id]["results"] = results
+            try:
+                page.goto(url, timeout=30000, wait_until="networkidle")
+                page.wait_for_timeout(1200)
+                html = page.content()
+                store_count = extract_store_count(html)
+            except:
+                store_count = 0
+
+            total = get_search_volume(kw)
+
+            grade = "A" if store_count == 0 else "B"
+
+            results.append({
+                "title": kw,
+                "total": total,
+                "storeCount": store_count,
+                "grade": grade,
+                "link": url
+            })
+
+            elapsed = time.time() - start_time
+            avg_time = elapsed / (i + 1)
+            remaining = int(avg_time * (total_count - (i + 1)))
+
+            with jobs_lock:
+                jobs[job_id]["progress"] = int(((i + 1) / total_count) * 100)
+                jobs[job_id]["remaining"] = max(0, remaining)
+                jobs[job_id]["results"] = results
+
+        browser.close()
 
     with jobs_lock:
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["progress"] = 100
         jobs[job_id]["remaining"] = 0
+        jobs[job_id]["current"] = ""
 
 
 # ============================
@@ -238,6 +228,7 @@ th{background:#222;color:#fff;}
 
 <div id="progress"></div>
 <div id="remaining"></div>
+<div id="current"></div>
 
 <table id="table">
 <tr>
@@ -252,6 +243,12 @@ th{background:#222;color:#fff;}
 <script>
 let jobId=null;
 let results=[];
+
+function formatTime(sec){
+  let m=Math.floor(sec/60);
+  let s=sec%60;
+  return m+"분 "+s+"초";
+}
 
 function start(){
   let lines=document.getElementById("keywords").value
@@ -274,10 +271,13 @@ function poll(){
   .then(r=>r.json())
   .then(d=>{
     document.getElementById("progress").innerText="진행률: "+d.progress+"%";
-    document.getElementById("remaining").innerText="남은 예상 시간: "+d.remaining+"초";
+    document.getElementById("remaining").innerText=
+      d.remaining>0 ? "남은 예상 시간: "+formatTime(d.remaining) : "";
+    document.getElementById("current").innerText=
+      d.current ? "현재 처리중: "+d.current : "";
 
     if(d.status!=="completed"){
-      setTimeout(poll,2000);
+      setTimeout(poll,1500);
     }else{
       results=d.results;
       render();
@@ -329,6 +329,7 @@ function download(){
 </html>
 """
 
+
 @app.post("/start")
 def start(data: dict = Body(...)):
     keywords = data.get("keywords", [])
@@ -338,6 +339,7 @@ def start(data: dict = Body(...)):
         "status": "queued",
         "progress": 0,
         "remaining": 0,
+        "current": "",
         "results": []
     }
 
