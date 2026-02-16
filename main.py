@@ -1,17 +1,25 @@
-from flask import Flask, render_template_string, request, jsonify, send_file
-import requests
 import re
 import csv
 import io
 from urllib.parse import quote
 
-app = Flask(__name__)
+import requests
+from fastapi import FastAPI, Body
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
+app = FastAPI()
 
-HTML = """
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+HTML = r"""
 <!doctype html>
 <title>naverbookab</title>
 <h1>naverbookab</h1>
@@ -92,6 +100,13 @@ function processNext(queue){
 
         renderTable();
         processNext(queue);
+    })
+    .catch(err => {
+        // 네트워크/서버 오류 시에도 다음 진행
+        results.push({keyword, count: 0, grade: "B", link: "https://search.naver.com/search.naver?where=book&query="+encodeURIComponent(keyword)});
+        completed++;
+        renderTable();
+        processNext(queue);
     });
 }
 
@@ -151,64 +166,53 @@ function downloadExcel(){
 </script>
 """
 
-# 🔥 핵심 수정된 함수
-def check_keyword(keyword):
-
-    url = f"https://search.naver.com/search.naver?where=book&query={quote(keyword)}"
+# ✅ 판매처 판정: "판매처 숫자"가 한 번이라도 있으면 무조건 B (절대 A 금지)
+def check_keyword(keyword: str) -> dict:
+    # 반드시 도서 전용 검색
+    url = "https://search.naver.com/search.naver?where=book&query=" + quote(keyword)
 
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
         html = r.text
 
-        # 판매처 숫자 완전 대응
-        matches = re.findall(
-            r"판매처\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)",
-            html
-        )
+        # 콤마/큰 숫자 전부 대응: 3, 157, 1,234, 12,345, 103,582 ...
+        matches = re.findall(r"판매처\s*([0-9]+(?:,[0-9]{3})*)", html)
 
         if matches:
-            numbers = []
+            nums = []
             for m in matches:
                 try:
-                    numbers.append(int(m.replace(",", "")))
+                    nums.append(int(m.replace(",", "")))
                 except:
                     pass
 
-            if numbers:
-                return {
-                    "keyword": keyword,
-                    "count": max(numbers),
-                    "grade": "B",
-                    "link": url
-                }
+            if nums:
+                # 하나라도 있으면 무조건 B
+                return {"keyword": keyword, "count": max(nums), "grade": "B", "link": url}
 
-        return {
-            "keyword": keyword,
-            "count": 0,
-            "grade": "A",
-            "link": url
-        }
+        # 판매처 숫자 완전 없음 → A
+        return {"keyword": keyword, "count": 0, "grade": "A", "link": url}
 
     except:
-        return {
-            "keyword": keyword,
-            "count": 0,
-            "grade": "B",  # 안전 모드
-            "link": url
-        }
+        # 예외/차단/타임아웃이면 안전하게 B
+        return {"keyword": keyword, "count": 0, "grade": "B", "link": url}
 
-@app.route("/")
+
+@app.get("/", response_class=HTMLResponse)
 def home():
-    return render_template_string(HTML)
+    return HTML
 
-@app.route("/check", methods=["POST"])
-def check():
-    data = request.get_json()
-    return jsonify(check_keyword(data["keyword"]))
 
-@app.route("/download", methods=["POST"])
-def download():
-    data = request.get_json()
+@app.post("/check")
+def check(data: dict = Body(...)):
+    keyword = (data.get("keyword") or "").strip()
+    if not keyword:
+        return JSONResponse({"keyword": "", "count": 0, "grade": "A", "link": ""})
+    return check_keyword(keyword)
+
+
+@app.post("/download")
+def download(data: dict = Body(...)):
     results = data.get("results", [])
 
     output = io.StringIO()
@@ -216,16 +220,18 @@ def download():
     writer.writerow(["키워드", "판매처개수", "분류", "링크"])
 
     for r in results:
-        writer.writerow([r["keyword"], r["count"], r["grade"], r["link"]])
+        writer.writerow([
+            r.get("keyword", ""),
+            r.get("count", 0),
+            r.get("grade", ""),
+            r.get("link", "")
+        ])
 
     output.seek(0)
 
-    return send_file(
-        io.BytesIO(output.getvalue().encode("utf-8-sig")),
-        mimetype="text/csv",
-        as_attachment=True,
-        download_name="naverbookab_result.csv"
+    bytes_io = io.BytesIO(output.getvalue().encode("utf-8-sig"))
+    return StreamingResponse(
+        bytes_io,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=naverbookab_result.csv"},
     )
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
