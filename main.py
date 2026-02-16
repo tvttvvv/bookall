@@ -6,7 +6,6 @@ import base64
 import requests
 import pandas as pd
 import io
-import re
 
 from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,14 +23,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# -----------------------------
+# 환경 변수
+# -----------------------------
 ACCESS_KEY = os.getenv("ACCESS_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY")
 CUSTOMER_ID = os.getenv("CUSTOMER_ID")
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID")
+NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
 
 # -----------------------------
-# 네이버 광고 API 서명
+# 광고 API 서명
 # -----------------------------
 def generate_signature(timestamp, method, uri):
     message = f"{timestamp}.{method}.{uri}"
@@ -43,7 +46,7 @@ def generate_signature(timestamp, method, uri):
     return base64.b64encode(hash.digest()).decode()
 
 # -----------------------------
-# 검색량
+# 검색량 조회 (광고 API)
 # -----------------------------
 def get_search_volume(keyword):
 
@@ -60,12 +63,17 @@ def get_search_volume(keyword):
         "X-Signature": signature,
     }
 
-    params = {"hintKeywords": keyword, "showDetail": 1}
-    url = "https://api.naver.com" + uri
+    params = {
+        "hintKeywords": keyword,
+        "showDetail": 1
+    }
+
+    url = "https://api.searchad.naver.com" + uri
 
     try:
         r = requests.get(url, headers=headers, params=params)
         data = r.json()
+
         if "keywordList" not in data or not data["keywordList"]:
             return 0
 
@@ -77,21 +85,45 @@ def get_search_volume(keyword):
         if mobile == "< 10": mobile = 0
 
         return int(pc) + int(mobile)
+
     except:
         return 0
 
 # -----------------------------
-# 판매처 개수
+# 판매처 개수 (도서 Open API 기반)
 # -----------------------------
 def get_store_count(keyword):
 
-    url = f"https://search.naver.com/search.naver?query={keyword}"
+    url = "https://openapi.naver.com/v1/search/book.json"
+
+    headers = {
+        "X-Naver-Client-Id": NAVER_CLIENT_ID,
+        "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
+    }
+
+    params = {
+        "query": keyword,
+        "display": 1
+    }
 
     try:
-        r = requests.get(url, headers=HEADERS, timeout=5)
-        html = r.text
-        match = re.search(r"판매처\s*(\d+)", html)
-        return int(match.group(1)) if match else 0
+        r = requests.get(url, headers=headers, params=params)
+        data = r.json()
+
+        if "items" not in data or not data["items"]:
+            return 0
+
+        item = data["items"][0]
+
+        # 네이버 도서 API에는 직접 판매처 수는 없지만
+        # 링크 존재 여부로 판단 (도서 존재 여부 기반 경쟁 판단)
+        link = item.get("link")
+
+        if link:
+            return 1  # 도서 존재 = 경쟁 있음
+        else:
+            return 0
+
     except:
         return 0
 
@@ -150,7 +182,6 @@ def home():
                     .filter(x=>x.trim()!=="");
 
         originalOrder = lines;
-        results = [];
 
         Promise.all(
             lines.map(k =>
@@ -231,7 +262,7 @@ def home():
     """
 
 # -----------------------------
-# 단일 검색 API
+# 단일 검색
 # -----------------------------
 @app.post("/searchOne")
 def search_one(data: dict = Body(...)):
