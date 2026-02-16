@@ -51,9 +51,6 @@ placeholder="책 제목을 한 줄에 하나씩 입력"></textarea><br><br>
 <script>
 let results = [];
 let originalOrder = [];
-let total = 0;
-let completed = 0;
-let startTime;
 
 document.getElementById("keywords").addEventListener("input", function(){
     let lines = this.value.split("\\n").filter(x => x.trim() !== "");
@@ -62,13 +59,13 @@ document.getElementById("keywords").addEventListener("input", function(){
 
 function startSearch(){
     results = [];
-    completed = 0;
-    startTime = Date.now();
+
     let lines = document.getElementById("keywords").value
-                .split("\\n")
-                .filter(x => x.trim() !== "");
+        .split("\\n")
+        .map(x => x.trim())
+        .filter(x => x !== "");
+
     originalOrder = lines;
-    total = lines.length;
 
     processNext([...lines]);
 }
@@ -88,24 +85,10 @@ function processNext(queue){
     .then(res => res.json())
     .then(data => {
         results.push(data);
-        completed++;
-
-        let elapsed = (Date.now() - startTime)/1000;
-        let avg = elapsed / completed;
-        let remain = Math.round(avg * (total - completed));
-
-        document.getElementById("progress").innerText =
-            "진행: " + completed + "/" + total +
-            " | 남은 예상시간: " + remain + "초";
-
         renderTable();
         processNext(queue);
     })
-    .catch(err => {
-        // 네트워크/서버 오류 시에도 다음 진행
-        results.push({keyword, count: 0, grade: "B", link: "https://search.naver.com/search.naver?where=book&query="+encodeURIComponent(keyword)});
-        completed++;
-        renderTable();
+    .catch(() => {
         processNext(queue);
     });
 }
@@ -125,6 +108,7 @@ function getSortedResults(){
 
 function renderTable(){
     let table = document.getElementById("resultTable");
+
     table.innerHTML = `
     <tr>
     <th>키워드</th>
@@ -147,12 +131,10 @@ function renderTable(){
 }
 
 function downloadExcel(){
-    let sortedData = getSortedResults();
-
     fetch("/download", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({results: sortedData})
+        body: JSON.stringify({results: results})
     })
     .then(res => res.blob())
     .then(blob => {
@@ -166,35 +148,23 @@ function downloadExcel(){
 </script>
 """
 
-# ✅ 판매처 판정: "판매처 숫자"가 한 번이라도 있으면 무조건 B (절대 A 금지)
-def check_keyword(keyword: str) -> dict:
-    # 반드시 도서 전용 검색
+def check_keyword(keyword: str):
+
     url = "https://search.naver.com/search.naver?where=book&query=" + quote(keyword)
 
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
         html = r.text
 
-        # 콤마/큰 숫자 전부 대응: 3, 157, 1,234, 12,345, 103,582 ...
         matches = re.findall(r"판매처\s*([0-9]+(?:,[0-9]{3})*)", html)
 
         if matches:
-            nums = []
-            for m in matches:
-                try:
-                    nums.append(int(m.replace(",", "")))
-                except:
-                    pass
+            nums = [int(m.replace(",", "")) for m in matches]
+            return {"keyword": keyword, "count": max(nums), "grade": "B", "link": url}
 
-            if nums:
-                # 하나라도 있으면 무조건 B
-                return {"keyword": keyword, "count": max(nums), "grade": "B", "link": url}
-
-        # 판매처 숫자 완전 없음 → A
         return {"keyword": keyword, "count": 0, "grade": "A", "link": url}
 
     except:
-        # 예외/차단/타임아웃이면 안전하게 B
         return {"keyword": keyword, "count": 0, "grade": "B", "link": url}
 
 
@@ -206,8 +176,6 @@ def home():
 @app.post("/check")
 def check(data: dict = Body(...)):
     keyword = (data.get("keyword") or "").strip()
-    if not keyword:
-        return JSONResponse({"keyword": "", "count": 0, "grade": "A", "link": ""})
     return check_keyword(keyword)
 
 
@@ -220,18 +188,12 @@ def download(data: dict = Body(...)):
     writer.writerow(["키워드", "판매처개수", "분류", "링크"])
 
     for r in results:
-        writer.writerow([
-            r.get("keyword", ""),
-            r.get("count", 0),
-            r.get("grade", ""),
-            r.get("link", "")
-        ])
+        writer.writerow([r["keyword"], r["count"], r["grade"], r["link"]])
 
     output.seek(0)
 
-    bytes_io = io.BytesIO(output.getvalue().encode("utf-8-sig"))
     return StreamingResponse(
-        bytes_io,
+        io.BytesIO(output.getvalue().encode("utf-8-sig")),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=naverbookab_result.csv"},
     )
