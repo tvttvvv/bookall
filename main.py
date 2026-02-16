@@ -1,31 +1,23 @@
+from flask import Flask, render_template_string, request, jsonify, send_file
+import requests
 import re
 import csv
 import io
 from urllib.parse import quote
 
-import requests
-from fastapi import FastAPI, Body
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+app = Flask(__name__)
 
-app = FastAPI()
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-
-HTML = r"""
+HTML = """
 <!doctype html>
 <title>naverbookab</title>
 <h1>naverbookab</h1>
 
 <textarea id="keywords" rows="15" cols="60"
-placeholder="책 제목을 줄바꿈 또는 공백으로 입력"></textarea><br><br>
+placeholder="책 제목을 한 줄에 하나씩 입력"></textarea><br><br>
 
 <p>총 입력 건수: <span id="count">0</span></p>
 
@@ -51,22 +43,24 @@ placeholder="책 제목을 줄바꿈 또는 공백으로 입력"></textarea><br>
 <script>
 let results = [];
 let originalOrder = [];
+let total = 0;
+let completed = 0;
+let startTime;
 
 document.getElementById("keywords").addEventListener("input", function(){
-    let lines = this.value.split(/\\s+/).filter(x => x.trim() !== "");
+    let lines = this.value.split("\\n").filter(x => x.trim() !== "");
     document.getElementById("count").innerText = lines.length;
 });
 
 function startSearch(){
     results = [];
-
-    // 🔥 모든 공백(줄바꿈, 스페이스, 탭) 기준 분리
+    completed = 0;
+    startTime = Date.now();
     let lines = document.getElementById("keywords").value
-        .split(/\\s+/)
-        .map(x => x.trim())
-        .filter(x => x !== "");
-
+                .split("\\n")
+                .filter(x => x.trim() !== "");
     originalOrder = lines;
+    total = lines.length;
 
     processNext([...lines]);
 }
@@ -86,10 +80,17 @@ function processNext(queue){
     .then(res => res.json())
     .then(data => {
         results.push(data);
+        completed++;
+
+        let elapsed = (Date.now() - startTime)/1000;
+        let avg = elapsed / completed;
+        let remain = Math.round(avg * (total - completed));
+
+        document.getElementById("progress").innerText =
+            "진행: " + completed + "/" + total +
+            " | 남은 예상시간: " + remain + "초";
+
         renderTable();
-        processNext(queue);
-    })
-    .catch(() => {
         processNext(queue);
     });
 }
@@ -109,7 +110,6 @@ function getSortedResults(){
 
 function renderTable(){
     let table = document.getElementById("resultTable");
-
     table.innerHTML = `
     <tr>
     <th>키워드</th>
@@ -132,10 +132,12 @@ function renderTable(){
 }
 
 function downloadExcel(){
+    let sortedData = getSortedResults();
+
     fetch("/download", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({results: results})
+        body: JSON.stringify({results: sortedData})
     })
     .then(res => res.blob())
     .then(blob => {
@@ -149,25 +151,36 @@ function downloadExcel(){
 </script>
 """
 
-def check_keyword(keyword: str):
+# 🔥 핵심 수정된 함수
+def check_keyword(keyword):
 
-    url = "https://search.naver.com/search.naver?where=book&query=" + quote(keyword)
+    url = f"https://search.naver.com/search.naver?where=book&query={quote(keyword)}"
 
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
         html = r.text
 
-        # 🔥 판매처 숫자 완전 대응 (콤마 포함)
-        matches = re.findall(r"판매처\s*([0-9]+(?:,[0-9]{3})*)", html)
+        # 판매처 숫자 완전 대응
+        matches = re.findall(
+            r"판매처\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)",
+            html
+        )
 
         if matches:
-            nums = [int(m.replace(",", "")) for m in matches]
-            return {
-                "keyword": keyword,
-                "count": max(nums),
-                "grade": "B",
-                "link": url
-            }
+            numbers = []
+            for m in matches:
+                try:
+                    numbers.append(int(m.replace(",", "")))
+                except:
+                    pass
+
+            if numbers:
+                return {
+                    "keyword": keyword,
+                    "count": max(numbers),
+                    "grade": "B",
+                    "link": url
+                }
 
         return {
             "keyword": keyword,
@@ -184,17 +197,18 @@ def check_keyword(keyword: str):
             "link": url
         }
 
-@app.get("/", response_class=HTMLResponse)
+@app.route("/")
 def home():
-    return HTML
+    return render_template_string(HTML)
 
-@app.post("/check")
-def check(data: dict = Body(...)):
-    keyword = (data.get("keyword") or "").strip()
-    return check_keyword(keyword)
+@app.route("/check", methods=["POST"])
+def check():
+    data = request.get_json()
+    return jsonify(check_keyword(data["keyword"]))
 
-@app.post("/download")
-def download(data: dict = Body(...)):
+@app.route("/download", methods=["POST"])
+def download():
+    data = request.get_json()
     results = data.get("results", [])
 
     output = io.StringIO()
@@ -206,8 +220,12 @@ def download(data: dict = Body(...)):
 
     output.seek(0)
 
-    return StreamingResponse(
+    return send_file(
         io.BytesIO(output.getvalue().encode("utf-8-sig")),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=naverbookab_result.csv"},
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name="naverbookab_result.csv"
     )
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
