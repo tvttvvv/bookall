@@ -16,7 +16,7 @@ from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 
-# Playwright는 환경에 따라 실패할 수 있어 안전하게 import
+# Playwright (환경 따라 실패 가능)
 try:
     from playwright.sync_api import sync_playwright
     PLAYWRIGHT_AVAILABLE = True
@@ -38,7 +38,7 @@ ACCESS_KEY = os.getenv("ACCESS_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY")
 CUSTOMER_ID = os.getenv("CUSTOMER_ID")
 
-# 1이면 playwright 우선, 0이면 requests만 사용(서버에서 playwright가 불안하면 0 추천)
+# 1이면 playwright 우선(권장), 0이면 requests만(정확도 떨어질 수 있음)
 USE_PLAYWRIGHT = os.getenv("USE_PLAYWRIGHT", "1").strip() != "0"
 
 UA_HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -62,7 +62,7 @@ def generate_signature(timestamp: str, method: str, uri: str) -> str:
 
 
 # -----------------------------
-# 검색량 총합 (정확값)
+# 검색량 총합(정확값)
 # -----------------------------
 def get_search_volume(keyword: str) -> int:
     try:
@@ -81,7 +81,6 @@ def get_search_volume(keyword: str) -> int:
             "X-Customer": CUSTOMER_ID,
             "X-Signature": sig,
         }
-
         params = {"hintKeywords": keyword, "showDetail": 1}
 
         r = requests.get(
@@ -90,8 +89,8 @@ def get_search_volume(keyword: str) -> int:
             params=params,
             timeout=12,
         )
-
         data = r.json()
+
         if "keywordList" not in data or not data["keywordList"]:
             return 0
 
@@ -109,13 +108,18 @@ def get_search_volume(keyword: str) -> int:
         return 0
 
 
+def build_naver_book_url(keyword: str) -> str:
+    return "https://search.naver.com/search.naver?where=book&query=" + quote(keyword)
+
+
 # -----------------------------
-# 대표카드 감지 (두 번째 이미지 규칙)
+# 대표카드 감지(두 번째 이미지 규칙)
 # -----------------------------
 def has_representative_card(html: str) -> bool:
     if not html:
         return False
 
+    # 대표 카드에 자주 붙는 텍스트들
     markers = [
         "도서 더보기",
         "네이버는 상품판매의 당사자가 아닙니다",
@@ -126,36 +130,41 @@ def has_representative_card(html: str) -> bool:
         "네이버페이포인트",
         "네이버 도서",
     ]
-
-    hit = 0
-    for m in markers:
-        if m in html:
-            hit += 1
-
-    # 너무 느슨하면 오탐이라 2개 이상이면 대표카드로 판단
+    hit = sum(1 for m in markers if m in html)
     return hit >= 2
 
 
 # -----------------------------
-# 판매처 숫자 추출 (첫 번째 이미지 규칙)
+# ✅ 판매처/대표카드/검색결과없음 판정 (핵심)
 # -----------------------------
-def extract_store_count(html: str) -> int:
+def extract_store_count_and_flags(html: str) -> tuple[int, bool, bool]:
     """
-    규칙:
-    - '판매처 872' 같은 숫자 하나라도 있으면 -> 그 최대값 반환 (=> 무조건 B)
-    - 숫자 없더라도 대표카드면 -> 1 반환 (=> 무조건 B)
-    - 둘 다 없으면 -> 0 (=> A)
-    - 불확실/에러는 프로그램 안정 위해 1(B)
+    return: (store_count, is_rep_card, is_no_result)
+
+    규칙(버그 방지 핵심):
+    - 판매처 숫자 하나라도 잡히면 store_count=max숫자 (=> B 확정)
+    - 대표카드면 store_count=1 (=> B 확정)
+    - '검색결과 없음'이 확실하면 store_count=0 (=> A)
+    - 그 외(판단 불가/JS 미노출)는 store_count=1 (=> B로 보수처리)
     """
     try:
         if not html:
-            return 1
+            return 1, False, False
 
+        # 1) 검색결과 없음(진짜 A 케이스)
+        no_result_markers = [
+            "검색결과가 없습니다",
+            "검색 결과가 없습니다",
+            "검색결과가 없",
+            "검색 결과가 없",
+        ]
+        is_no_result = any(m in html for m in no_result_markers)
+
+        # 2) 판매처 숫자 추출 (첫 번째 이미지)
         patterns = [
             r"(?:도서\s*)?판매처\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)",
             r"판매처[^0-9]{0,30}([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)",
         ]
-
         nums = []
         for pat in patterns:
             for m in re.findall(pat, html):
@@ -165,28 +174,28 @@ def extract_store_count(html: str) -> int:
                     pass
 
         if nums:
-            return max(nums)  # ✅ 판매처 숫자 있으면 무조건 B
+            return max(nums), False, False  # ✅ 판매처 숫자 있으면 무조건 B
 
-        if has_representative_card(html):
-            return 1  # ✅ 대표카드면 무조건 B
+        # 3) 대표카드(두 번째 이미지)면 무조건 B
+        rep = has_representative_card(html)
+        if rep:
+            return 1, True, False
 
-        if "판매처" in html:
-            return 1  # 판매처 문구만 있어도 B로
+        # 4) 검색결과 없음이 확실하면 A
+        if is_no_result:
+            return 0, False, True
 
-        return 0  # ✅ 아무것도 없으면 A
+        # 5) 그 외(판단 불가) => A로 두면 지금같은 사고 발생하므로 B로 보수처리
+        return 1, False, False
+
     except Exception:
-        return 1
-
-
-def build_naver_book_url(keyword: str) -> str:
-    return "https://search.naver.com/search.naver?where=book&query=" + quote(keyword)
+        return 1, False, False
 
 
 # -----------------------------
-# 판매처 bulk: playwright 우선 + 실패 시 requests fallback
+# 판매처 bulk (Playwright 우선)
 # -----------------------------
 def get_store_counts_bulk(keywords: list[str]) -> dict[str, int]:
-    # 원본 순서 유지한 채 공백 제거 + 중복 제거(부하 감소)
     clean = []
     seen = set()
     for k in keywords:
@@ -200,7 +209,7 @@ def get_store_counts_bulk(keywords: list[str]) -> dict[str, int]:
 
     results: dict[str, int] = {}
 
-    # 1) Playwright 경로
+    # Playwright 경로(권장: 판매처 정확)
     if USE_PLAYWRIGHT and PLAYWRIGHT_AVAILABLE:
         try:
             with sync_playwright() as p:
@@ -213,29 +222,29 @@ def get_store_counts_bulk(keywords: list[str]) -> dict[str, int]:
                         page.goto(url, timeout=30000, wait_until="networkidle")
                         page.wait_for_timeout(1200)
                         html = page.content()
-                        results[kw] = extract_store_count(html)
+                        store_count, _, _ = extract_store_count_and_flags(html)
+                        results[kw] = store_count
                     except Exception:
+                        # 실패해도 A로 떨어지지 않게 B 처리
                         results[kw] = 1
-                    time.sleep(0.6)
+                    time.sleep(0.5)
 
                 browser.close()
-
-            # playwright로 못 채운 키 있으면 fallback에서 채움
+            return results
         except Exception:
-            # playwright 전체 실패 → fallback로 통째로 처리
+            # Playwright 전체 실패 -> 아래 fallback
             results = {}
 
-    # 2) requests fallback (playwright가 실패/비활성일 때)
+    # fallback: requests (정확도 낮을 수 있음, 그래도 A로는 거의 안 떨어지게 보수 처리)
     for kw in clean:
-        if kw in results:
-            continue
         url = build_naver_book_url(kw)
         try:
             r = requests.get(url, headers=UA_HEADERS, timeout=12)
-            results[kw] = extract_store_count(r.text)
+            store_count, _, _ = extract_store_count_and_flags(r.text)
+            results[kw] = store_count
         except Exception:
             results[kw] = 1
-        time.sleep(0.4)
+        time.sleep(0.3)
 
     return results
 
@@ -256,10 +265,9 @@ def build_row(keyword: str, store_count: int) -> dict:
 
 
 # -----------------------------
-# Job 처리: 어떤 예외가 나도 results는 비지 않게
+# Job 처리
 # -----------------------------
 def process_job(job_id: str, keywords: list[str]):
-    # 기본 상태 세팅
     with jobs_lock:
         jobs[job_id]["status"] = "running"
         jobs[job_id]["progress"] = 0
@@ -270,18 +278,18 @@ def process_job(job_id: str, keywords: list[str]):
     clean = [k for k in clean if k]
     total_count = max(len(clean), 1)
 
-    # 판매처 먼저 bulk
+    # 판매처 먼저
     try:
         store_map = get_store_counts_bulk(clean)
     except Exception as e:
         store_map = {}
         with jobs_lock:
-            jobs[job_id]["error"] = f"store_count_failed: {type(e).__name__}"
+            jobs[job_id]["error"] = f"store_failed:{type(e).__name__}"
 
     results = []
     for i, kw in enumerate(clean):
         try:
-            store_count = store_map.get(kw, 1)  # 못잡으면 B로 안전
+            store_count = store_map.get(kw, 1)  # 못잡으면 B
             row = build_row(kw, store_count)
         except Exception as e:
             row = {
@@ -289,21 +297,19 @@ def process_job(job_id: str, keywords: list[str]):
                 "total": 0,
                 "storeCount": 1,
                 "grade": "B",
-                "link": build_naver_book_url(kw)
+                "link": build_naver_book_url(kw),
             }
             with jobs_lock:
-                # 에러가 있어도 작업은 계속 진행
                 if not jobs[job_id].get("error"):
-                    jobs[job_id]["error"] = f"row_failed: {type(e).__name__}"
+                    jobs[job_id]["error"] = f"row_failed:{type(e).__name__}"
 
         results.append(row)
 
-        progress = int(((i + 1) / total_count) * 100)
         with jobs_lock:
-            jobs[job_id]["progress"] = progress
+            jobs[job_id]["progress"] = int(((i + 1) / total_count) * 100)
             jobs[job_id]["results"] = results
 
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     with jobs_lock:
         jobs[job_id]["status"] = "completed"
@@ -343,7 +349,8 @@ button,select{padding:8px 10px;}
 
 <div class="small">
 - 줄바꿈 복붙 시 자동 권수 카운트<br/>
-- B 규칙: (1) 판매처 숫자(예: 판매처 872)가 하나라도 있으면 무조건 B (2) 대표카드(상세 카드)면 무조건 B
+- B 규칙: (1) 판매처 숫자(예: 판매처 872)가 하나라도 있으면 무조건 B (2) 대표카드(상세 카드)면 무조건 B<br/>
+- A는 "검색결과 없음"이 확실할 때만 나옴(그 외는 보수적으로 B 처리)
 </div>
 
 <br/>
