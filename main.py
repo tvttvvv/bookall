@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
+
 from playwright.sync_api import sync_playwright
 
 load_dotenv()
@@ -91,7 +92,7 @@ def get_search_volume(keyword):
         return 0
 
 # -----------------------------
-# 🔥 100% 정확 판매처 검사 (큰 숫자 완전 대응)
+# 🔥 100% 정확 판매처 검사 (브라우저 렌더링 기반)
 # -----------------------------
 def get_store_count(keyword):
 
@@ -101,18 +102,14 @@ def get_store_count(keyword):
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
-            page.goto(url, timeout=30000)
-            page.wait_for_timeout(2500)  # JS 완전 렌더링 대기
+            page.goto(url, timeout=20000)
+            page.wait_for_timeout(2000)  # JS 렌더링 대기
 
             html = page.content()
             browser.close()
 
-        # 판매처 숫자 패턴 완전 대응
-        # 예: 판매처 3 / 판매처 157 / 판매처 1,234 / 판매처 12,345
-        matches = re.findall(
-            r"판매처\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)",
-            html
-        )
+        # 화면에 판매처 숫자 있으면 무조건 B
+        matches = re.findall(r"판매처\s*([0-9,]+)", html)
 
         if matches:
             numbers = []
@@ -170,7 +167,7 @@ def process_job(job_id, keywords):
 
         jobs[job_id]["progress"] = int(((i + 1) / total_count) * 100)
 
-        time.sleep(1)  # 브라우저 방식이므로 안정성 확보
+        time.sleep(1)  # 서버 보호
 
     jobs[job_id]["results"] = results
     jobs[job_id]["status"] = "completed"
@@ -186,7 +183,7 @@ def home():
 <html>
 <head>
 <meta charset="utf-8"/>
-<title>BookVPro 100% 정확</title>
+<title>BookVPro 100% 정확 버전</title>
 <style>
 body{font-family:Arial;padding:40px;}
 textarea{width:700px;height:250px;}
