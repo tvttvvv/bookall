@@ -14,11 +14,12 @@ import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 load_dotenv()
 
 app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,10 +34,9 @@ CUSTOMER_ID = os.getenv("CUSTOMER_ID")
 jobs = {}
 jobs_lock = threading.Lock()
 
-
-# ============================
-# 검색량
-# ============================
+# -----------------------------
+# 광고 API 서명
+# -----------------------------
 def generate_signature(timestamp, method, uri):
     message = f"{timestamp}.{method}.{uri}"
     hash_value = hmac.new(
@@ -47,6 +47,9 @@ def generate_signature(timestamp, method, uri):
     return base64.b64encode(hash_value).decode()
 
 
+# -----------------------------
+# 검색량 총합
+# -----------------------------
 def get_search_volume(keyword):
     try:
         if not ACCESS_KEY:
@@ -89,9 +92,9 @@ def get_search_volume(keyword):
         return 0
 
 
-# ============================
-# 판매처 추출 (requests 기반)
-# ============================
+# -----------------------------
+# 판매처 추출 (Railway 안전형)
+# -----------------------------
 def extract_store_count(keyword):
 
     url = f"https://search.naver.com/search.naver?where=book&query={quote(keyword)}"
@@ -103,9 +106,6 @@ def extract_store_count(keyword):
     try:
         r = requests.get(url, headers=headers, timeout=10)
         html = r.text
-
-        if "검색결과가 없습니다" in html:
-            return 0
 
         matches = re.findall(
             r"판매처\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)",
@@ -128,9 +128,9 @@ def extract_store_count(keyword):
         return 0
 
 
-# ============================
+# -----------------------------
 # Job 처리
-# ============================
+# -----------------------------
 def process_job(job_id, keywords):
 
     start_time = time.time()
@@ -140,15 +140,11 @@ def process_job(job_id, keywords):
         jobs[job_id]["status"] = "running"
         jobs[job_id]["progress"] = 0
         jobs[job_id]["remaining"] = 0
-        jobs[job_id]["current"] = ""
         jobs[job_id]["results"] = []
 
     results = []
 
     for i, kw in enumerate(keywords):
-
-        with jobs_lock:
-            jobs[job_id]["current"] = kw
 
         store_count = extract_store_count(kw)
         total = get_search_volume(kw)
@@ -172,13 +168,12 @@ def process_job(job_id, keywords):
             jobs[job_id]["remaining"] = max(0, remaining)
             jobs[job_id]["results"] = results
 
-        time.sleep(0.3)
+        time.sleep(0.2)
 
     with jobs_lock:
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["progress"] = 100
         jobs[job_id]["remaining"] = 0
-        jobs[job_id]["current"] = ""
 
 
 @app.post("/start")
@@ -190,7 +185,6 @@ def start(data: dict = Body(...)):
         "status": "queued",
         "progress": 0,
         "remaining": 0,
-        "current": "",
         "results": []
     }
 
@@ -202,3 +196,17 @@ def start(data: dict = Body(...)):
 @app.get("/status/{job_id}")
 def status(job_id: str):
     return jobs.get(job_id, {"error":"not found"})
+
+
+@app.post("/download")
+def download(data: dict = Body(...)):
+    df = pd.DataFrame(data.get("results", []))
+    output = io.BytesIO()
+    df.to_excel(output, index=False)
+    output.seek(0)
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition":"attachment; filename=result.xlsx"}
+    )
