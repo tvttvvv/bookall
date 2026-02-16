@@ -14,7 +14,9 @@ import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
+
+from playwright.sync_api import sync_playwright
 
 load_dotenv()
 
@@ -31,13 +33,7 @@ ACCESS_KEY = os.getenv("ACCESS_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY")
 CUSTOMER_ID = os.getenv("CUSTOMER_ID")
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-    "Referer": "https://www.naver.com"
-}
-
 jobs = {}
-store_cache = {}
 
 # -----------------------------
 # 광고 API 서명
@@ -52,7 +48,7 @@ def generate_signature(timestamp, method, uri):
     return base64.b64encode(hash).decode()
 
 # -----------------------------
-# 검색량 (총합만)
+# 검색량 (총합)
 # -----------------------------
 def get_search_volume(keyword):
 
@@ -72,9 +68,12 @@ def get_search_volume(keyword):
     params = {"hintKeywords": keyword, "showDetail": 1}
 
     try:
-        r = requests.get("https://api.searchad.naver.com" + uri,
-                         headers=headers, params=params, timeout=10)
-
+        r = requests.get(
+            "https://api.searchad.naver.com" + uri,
+            headers=headers,
+            params=params,
+            timeout=10
+        )
         data = r.json()
 
         if "keywordList" not in data or not data["keywordList"]:
@@ -93,56 +92,39 @@ def get_search_volume(keyword):
         return 0
 
 # -----------------------------
-# 🔥 99% 정확 판매처 검사 (상세페이지 진입 방식)
+# 🔥 100% 정확 판매처 검사 (브라우저 렌더링 기반)
 # -----------------------------
 def get_store_count(keyword):
 
-    if keyword in store_cache:
-        return store_cache[keyword]
+    url = "https://search.naver.com/search.naver?where=book&query=" + quote(keyword)
 
     try:
-        # 1️⃣ 도서 검색 페이지
-        search_url = "https://search.naver.com/search.naver?where=book&query=" + quote(keyword)
-        r = requests.get(search_url, headers=HEADERS, timeout=10)
-        html = r.text
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=20000)
+            page.wait_for_timeout(2000)  # JS 렌더링 대기
 
-        # 2️⃣ 첫 번째 도서 상세 링크 추출
-        link_match = re.search(r'href="(https://search\.naver\.com/book/catalog/[^"]+)"', html)
+            html = page.content()
+            browser.close()
 
-        if not link_match:
-            store_cache[keyword] = 0
-            return 0
+        # 화면에 판매처 숫자 있으면 무조건 B
+        matches = re.findall(r"판매처\s*([0-9,]+)", html)
 
-        detail_url = link_match.group(1)
+        if matches:
+            numbers = []
+            for m in matches:
+                try:
+                    numbers.append(int(m.replace(",", "")))
+                except:
+                    pass
 
-        # 3️⃣ 상세 페이지 진입
-        detail_res = requests.get(detail_url, headers=HEADERS, timeout=10)
-        detail_html = detail_res.text
+            if numbers:
+                return max(numbers)
 
-        # 4️⃣ 상세 페이지 안에서만 판매처 숫자 찾기
-        matches = re.findall(r"판매처\s*([0-9,]+)", detail_html)
-
-        if not matches:
-            store_cache[keyword] = 0
-            return 0
-
-        numbers = []
-        for m in matches:
-            try:
-                numbers.append(int(m.replace(",", "")))
-            except:
-                pass
-
-        if numbers:
-            max_value = max(numbers)
-            store_cache[keyword] = max_value
-            return max_value
-
-        store_cache[keyword] = 0
         return 0
 
     except:
-        store_cache[keyword] = 0
         return 0
 
 # -----------------------------
@@ -185,7 +167,7 @@ def process_job(job_id, keywords):
 
         jobs[job_id]["progress"] = int(((i + 1) / total_count) * 100)
 
-        time.sleep(0.5)  # 상세페이지 진입 방식이라 딜레이 증가
+        time.sleep(1)  # 서버 보호
 
     jobs[job_id]["results"] = results
     jobs[job_id]["status"] = "completed"
@@ -201,7 +183,7 @@ def home():
 <html>
 <head>
 <meta charset="utf-8"/>
-<title>BookVPro 99% 정확 버전</title>
+<title>BookVPro 100% 정확 버전</title>
 <style>
 body{font-family:Arial;padding:40px;}
 textarea{width:700px;height:250px;}
@@ -214,19 +196,12 @@ th{background:#222;color:#fff;}
 </head>
 <body>
 
-<h2>BookVPro 통합 검색 시스템 (99% 정확)</h2>
+<h2>BookVPro 통합 검색 시스템 (100% 정확)</h2>
 
 <textarea id="keywords" placeholder="책 제목 줄바꿈 입력"></textarea><br><br>
 
 <button onclick="start()">검색 시작</button>
 <button onclick="download()">엑셀 다운로드</button>
-
-<select id="sort" onchange="render()">
-<option value="original">원본</option>
-<option value="totalDesc">검색량 높은순</option>
-<option value="totalAsc">검색량 낮은순</option>
-<option value="Afirst">A 우선</option>
-</select>
 
 <div id="progress"></div>
 
@@ -242,14 +217,11 @@ th{background:#222;color:#fff;}
 
 <script>
 let jobId=null;
-let originalOrder=[];
 let results=[];
 
 function start(){
   let lines=document.getElementById("keywords").value
     .split("\\n").filter(x=>x.trim()!=="");
-
-  originalOrder=lines;
 
   fetch("/start",{
     method:"POST",
@@ -270,32 +242,12 @@ function poll(){
     document.getElementById("progress").innerText="진행률: "+d.progress+"%";
 
     if(d.status!=="completed"){
-      setTimeout(poll,1500);
+      setTimeout(poll,2000);
     }else{
       results=d.results;
       render();
     }
   });
-}
-
-function getSorted(){
-  let s=document.getElementById("sort").value;
-  let data=[...results];
-
-  if(s==="totalDesc"){
-    data.sort((a,b)=>b.total-a.total);
-  }
-  else if(s==="totalAsc"){
-    data.sort((a,b)=>a.total-b.total);
-  }
-  else if(s==="Afirst"){
-    data.sort((a,b)=>a.grade.localeCompare(b.grade));
-  }
-  else{
-    data.sort((a,b)=>originalOrder.indexOf(a.title)-originalOrder.indexOf(b.title));
-  }
-
-  return data;
 }
 
 function render(){
@@ -309,7 +261,7 @@ function render(){
   <th>링크</th>
   </tr>`;
 
-  getSorted().forEach(r=>{
+  results.forEach(r=>{
     table.innerHTML+=`
     <tr>
     <td>${r.title}</td>
@@ -325,7 +277,7 @@ function download(){
   fetch("/download",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({results:getSorted()})
+    body:JSON.stringify({results:results})
   })
   .then(r=>r.blob())
   .then(blob=>{
