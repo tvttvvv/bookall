@@ -16,18 +16,11 @@ from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 
-# Playwright는 환경에 따라 설치/런타임 이슈가 날 수 있어 전체를 방어함
-try:
-    from playwright.sync_api import sync_playwright
-    PLAYWRIGHT_OK = True
-except Exception:
-    sync_playwright = None
-    PLAYWRIGHT_OK = False
+from playwright.sync_api import sync_playwright
 
 load_dotenv()
 
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,15 +32,16 @@ ACCESS_KEY = os.getenv("ACCESS_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY")
 CUSTOMER_ID = os.getenv("CUSTOMER_ID")
 
-# Job 저장소 + 락(스레드 안전)
+# Jobs memory store (thread-safe)
 jobs = {}
 jobs_lock = threading.Lock()
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+UA_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# -------------------------------------------------
-# 광고 API 서명 (키 없으면 안전하게 빈 문자열)
-# -------------------------------------------------
+
+# -----------------------------
+# 광고 API 서명
+# -----------------------------
 def generate_signature(timestamp: str, method: str, uri: str) -> str:
     try:
         if not SECRET_KEY:
@@ -58,10 +52,15 @@ def generate_signature(timestamp: str, method: str, uri: str) -> str:
     except Exception:
         return ""
 
-# -------------------------------------------------
-# 검색량 (총합) - 네이버 검색광고 API
-# -------------------------------------------------
+
+# -----------------------------
+# 검색량 (총합) - 정확값 (광고 API)
+# -----------------------------
 def get_search_volume(keyword: str) -> int:
+    """
+    네이버 검색광고 API keywordstool:
+    monthlyPcQcCnt + monthlyMobileQcCnt 합(정확값)
+    """
     try:
         if not ACCESS_KEY or not SECRET_KEY or not CUSTOMER_ID:
             return 0
@@ -69,15 +68,15 @@ def get_search_volume(keyword: str) -> int:
         timestamp = str(int(time.time() * 1000))
         uri = "/keywordstool"
 
-        signature = generate_signature(timestamp, "GET", uri)
-        if not signature:
+        sig = generate_signature(timestamp, "GET", uri)
+        if not sig:
             return 0
 
         headers = {
             "X-Timestamp": timestamp,
             "X-API-KEY": ACCESS_KEY,
             "X-Customer": CUSTOMER_ID,
-            "X-Signature": signature,
+            "X-Signature": sig,
         }
 
         params = {"hintKeywords": keyword, "showDetail": 1}
@@ -86,15 +85,10 @@ def get_search_volume(keyword: str) -> int:
             "https://api.searchad.naver.com" + uri,
             headers=headers,
             params=params,
-            timeout=12
+            timeout=12,
         )
 
-        # 응답이 JSON이 아닐 가능성까지 방어
-        try:
-            data = r.json()
-        except Exception:
-            return 0
-
+        data = r.json()
         if "keywordList" not in data or not data["keywordList"]:
             return 0
 
@@ -112,23 +106,66 @@ def get_search_volume(keyword: str) -> int:
     except Exception:
         return 0
 
-# -------------------------------------------------
-# 판매처 숫자 추출 (HTML에서 최대값)
-#   - "판매처 872" 같은 표기도 잡힘
-# -------------------------------------------------
-def extract_store_count_from_html(html: str) -> int:
+
+# -----------------------------
+# ✅ 대표카드(두 번째 이미지) 감지
+# -----------------------------
+def has_representative_card(html: str) -> bool:
+    """
+    두 번째 이미지처럼 네이버 도서 '대표 카드'가 뜨는 페이지에서 자주 보이는 텍스트/구조 흔적을 이용.
+    네이버 마크업은 변할 수 있어서, 여러 마커를 OR로 잡아 '카드 있음' 판단.
+    """
+    if not html:
+        return False
+
+    # 화면 상단 카드에서 흔하게 보이는 텍스트들(스크린샷 기준 포함)
+    markers = [
+        "도서 더보기",  # 카드 하단 버튼
+        "네이버는 상품판매의 당사자가 아닙니다",  # 고지 문구
+        "출판사 서평",  # 카드 탭/섹션
+        "발행",         # 발행일 영역
+        "리뷰",         # 리뷰 표시
+        "랭킹",         # 랭킹 표시
+        "네이버페이포인트",  # 포인트 적립
+    ]
+
+    hit = 0
+    for m in markers:
+        if m in html:
+            hit += 1
+
+    # 너무 느슨하면 오탐 가능 -> 2개 이상 맞으면 대표카드로 판단
+    if hit >= 2:
+        return True
+
+    # 보조: 카드형 UI에서 자주 등장하는 구조 키워드 일부
+    # (오탐 줄이려고 1개만으로 true 안 됨)
+    if ("네이버 도서" in html) and ("도서 더보기" in html):
+        return True
+
+    return False
+
+
+# -----------------------------
+# ✅ 판매처 숫자 추출 (첫 번째 이미지 규칙)
+# -----------------------------
+def extract_store_count(html: str) -> int:
+    """
+    반환 규칙(네가 요구한 규칙 그대로):
+    1) '판매처 105', '도서 판매처 872' 같은 숫자가 1개라도 있으면 -> 그 최대값 반환 (=> 무조건 B)
+    2) 숫자가 안 잡혀도 '대표카드'가 있으면 -> 1 반환 (=> 무조건 B)
+    3) 둘 다 없으면 -> 0 반환 (=> A)
+    4) 예외/불확실 상황은 프로그램이 죽지 않게 B(1)로 처리
+    """
     try:
         if not html:
-            return 1  # 안전하게 B로
-        if "판매처" not in html:
-            return 0
+            return 1  # 안전(B)
 
-        # 여러 케이스 대응: "판매처 12", "도서 판매처 1,234" 등
+        # 1) 판매처 숫자 패턴들(여러 버전 대응)
         patterns = [
             r"(?:도서\s*)?판매처\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)",
             r"판매처[^0-9]{0,30}([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)",
         ]
-
         nums = []
         for pat in patterns:
             matches = re.findall(pat, html)
@@ -138,99 +175,86 @@ def extract_store_count_from_html(html: str) -> int:
                 except Exception:
                     pass
 
+        # ✅ 첫 번째 이미지 규칙: 판매처 숫자 하나라도 있으면 무조건 B
         if nums:
-            # “판매처 872” 같은 값이 있으면 여기서 872로 잡힘 → B 판정 확실
             return max(nums)
 
-        # '판매처'는 있는데 숫자 파싱 실패면 안전하게 1(B)
-        return 1
+        # ✅ 두 번째 이미지 규칙: 대표카드면 숫자 없어도 무조건 B
+        if has_representative_card(html):
+            return 1
+
+        # 판매처 단어는 있는데 숫자 파싱 실패 -> B로
+        if "판매처" in html:
+            return 1
+
+        # 아무것도 없으면 A
+        return 0
+
     except Exception:
         return 1
 
-# -------------------------------------------------
-# 판매처 집계 (Playwright 1회 실행/재사용)
-#   - 실패하면 requests fallback (프로그램 크래시 방지)
-# -------------------------------------------------
+
+# -----------------------------
+# 판매처 bulk (Playwright 1회 실행)
+# -----------------------------
 def get_store_counts_bulk(keywords: list[str]) -> dict[str, int]:
+    """
+    Playwright 브라우저 1회 실행 후 페이지를 재사용해서 과부하 방지.
+    실패 시에도 프로그램이 죽지 않도록 안전 기본값(1=B)을 넣음.
+    """
     results: dict[str, int] = {}
 
-    # 1) Playwright 경로
-    if PLAYWRIGHT_OK:
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-
-                for kw in keywords:
-                    kw = (kw or "").strip()
-                    if not kw:
-                        continue
-
-                    url = "https://search.naver.com/search.naver?where=book&query=" + quote(kw)
-                    try:
-                        page.goto(url, timeout=30000)
-                        # JS 로딩 여유
-                        page.wait_for_timeout(2500)
-                        html = page.content()
-                        results[kw] = extract_store_count_from_html(html)
-                    except Exception:
-                        # 에러 시 안전하게 B
-                        results[kw] = 1
-
-                    # 서버 보호
-                    time.sleep(1)
-
-                browser.close()
-
-            # 빠진 키 있으면 fallback로 채움
-            missing = [kw for kw in keywords if (kw or "").strip() and (kw.strip() not in results)]
-            if not missing:
-                return results
-
-        except Exception:
-            # Playwright 전체 실패 → fallback로 진행
-            pass
-
-    # 2) requests fallback (정확도는 Playwright보다 떨어질 수 있으나, 프로그램은 절대 안 죽게)
-    for kw in keywords:
-        kw = (kw or "").strip()
-        if not kw:
+    # 빈 값 제거 + 중복 제거(속도/부하 감소)
+    clean = []
+    seen = set()
+    for k in keywords:
+        k = (k or "").strip()
+        if not k:
             continue
-        if kw in results:
+        if k in seen:
             continue
+        seen.add(k)
+        clean.append(k)
 
-        url = "https://search.naver.com/search.naver?where=book&query=" + quote(kw)
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
-            results[kw] = extract_store_count_from_html(r.text)
-        except Exception:
-            results[kw] = 1
+    if not clean:
+        return results
 
-        time.sleep(1)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+
+        for kw in clean:
+            url = "https://search.naver.com/search.naver?where=book&query=" + quote(kw)
+            try:
+                # 네이버 렌더링 안정성 높이기
+                page.goto(url, timeout=30000, wait_until="networkidle")
+                page.wait_for_timeout(1200)
+
+                html = page.content()
+                results[kw] = extract_store_count(html)
+
+            except Exception:
+                # 에러 시에도 죽지 않게 B
+                results[kw] = 1
+
+            # 서버 보호
+            time.sleep(0.8)
+
+        browser.close()
 
     return results
 
-# -------------------------------------------------
-# row 생성
-# -------------------------------------------------
-def build_row(keyword: str, store_count: int | None = None) -> dict:
+
+# -----------------------------
+# 1건 결과 생성
+# -----------------------------
+def build_row(keyword: str, store_count: int) -> dict:
     kw = (keyword or "").strip()
-    if not kw:
-        return {
-            "title": "",
-            "total": 0,
-            "storeCount": 1,
-            "grade": "B",
-            "link": ""
-        }
+    link = "https://search.naver.com/search.naver?where=book&query=" + quote(kw)
 
     total = get_search_volume(kw)
 
-    if store_count is None:
-        # 혹시 단건 호출 시에도 안전하게
-        store_count = get_store_counts_bulk([kw]).get(kw, 1)
-
-    # A/B 분류 규칙
+    # ✅ A/B 정확 분류 규칙
     grade = "A" if int(store_count) == 0 else "B"
 
     return {
@@ -238,17 +262,18 @@ def build_row(keyword: str, store_count: int | None = None) -> dict:
         "total": int(total),
         "storeCount": int(store_count),
         "grade": grade,
-        "link": "https://search.naver.com/search.naver?where=book&query=" + quote(kw)
+        "link": link
     }
 
-# -------------------------------------------------
+
+# -----------------------------
 # Job 처리
-# -------------------------------------------------
+# -----------------------------
 def process_job(job_id: str, keywords: list[str]):
     try:
+        # 입력 정리(원본 순서 유지)
         clean = [(k or "").strip() for k in keywords]
         clean = [k for k in clean if k]
-
         total_count = max(len(clean), 1)
 
         with jobs_lock:
@@ -256,15 +281,16 @@ def process_job(job_id: str, keywords: list[str]):
             jobs[job_id]["progress"] = 0
             jobs[job_id]["results"] = []
 
-        # 판매처는 먼저 bulk로 정확 집계(Playwright 1회)
+        # 판매처는 bulk로 먼저 정확 집계
         store_map = get_store_counts_bulk(clean)
 
         results = []
         for i, kw in enumerate(clean):
             try:
-                row = build_row(kw, store_map.get(kw, 1))
+                store_count = store_map.get(kw, 1)  # 못 구하면 B로 안전
+                row = build_row(kw, store_count)
             except Exception:
-                # 어떤 키워드에서든 절대 죽지 않게 안전 row
+                # 어떤 상황에서도 Job이 깨지지 않게
                 row = {
                     "title": kw,
                     "total": 0,
@@ -280,8 +306,8 @@ def process_job(job_id: str, keywords: list[str]):
                 jobs[job_id]["progress"] = progress
                 jobs[job_id]["results"] = results
 
-            # 서버 보호(광고 API + 네이버 페이지)
-            time.sleep(1)
+            # 광고 API 보호
+            time.sleep(0.6)
 
         with jobs_lock:
             jobs[job_id]["status"] = "completed"
@@ -289,14 +315,15 @@ def process_job(job_id: str, keywords: list[str]):
             jobs[job_id]["results"] = results
 
     except Exception:
-        # 최악의 경우에도 job 객체는 completed로 끝내서 UI가 멈추지 않게
+        # 최악에도 UI가 멈추지 않게 completed 처리
         with jobs_lock:
             jobs[job_id]["status"] = "completed"
             jobs[job_id]["progress"] = 100
 
-# -------------------------------------------------
+
+# -----------------------------
 # UI
-# -------------------------------------------------
+# -----------------------------
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
@@ -304,7 +331,7 @@ def home():
 <html>
 <head>
 <meta charset="utf-8"/>
-<title>BookVPro 통합 안정판</title>
+<title>BookVPro 최종 안정판</title>
 <style>
 body{font-family:Arial;padding:40px;}
 textarea{width:720px;height:260px;}
@@ -325,7 +352,7 @@ button,select{padding:8px 10px;}
 
 <div class="small">
 - 줄바꿈으로 여러 권 입력 가능 / 복붙하면 자동으로 권수 카운트<br/>
-- 검색량은 광고 API 총합(PC+모바일) / 판매처는 네이버 도서 검색페이지에서 숫자 집계
+- B 분류 규칙: (1) 판매처 숫자(예: 판매처 872)가 하나라도 있으면 무조건 B (2) 대표카드(상세 카드)면 무조건 B
 </div>
 
 <br/>
@@ -429,7 +456,6 @@ function poll(){
     }
   })
   .catch(()=>{
-    // 폴링 중 네트워크 흔들려도 UI가 멈추지 않게
     setTimeout(poll,2500);
   });
 }
@@ -445,7 +471,6 @@ function getSorted(){
   }else if(sort==="A"){
     data.sort((a,b)=>String(a.grade||"B").localeCompare(String(b.grade||"B")));
   }else{
-    // 원본
     data.sort((a,b)=> originalOrder.indexOf(a.title) - originalOrder.indexOf(b.title));
   }
   return data;
@@ -482,7 +507,6 @@ function render(){
   });
 }
 
-// XSS 방어(복붙 입력값 보호)
 function escapeHtml(str){
   return String(str)
     .replaceAll("&","&amp;")
@@ -493,7 +517,7 @@ function escapeHtml(str){
 }
 
 function download(){
-  const data = getSorted(); // 현재 정렬 상태 그대로 다운로드
+  const data = getSorted(); // 현재 정렬 반영
 
   fetch("/download",{
     method:"POST",
@@ -518,84 +542,56 @@ function download(){
 </html>
 """
 
-# -------------------------------------------------
-# API
-# -------------------------------------------------
+
+# -----------------------------
+# API: start/status/download
+# -----------------------------
 @app.post("/start")
 def start(data: dict = Body(...)):
-    try:
-        keywords = data.get("keywords", [])
-        if not isinstance(keywords, list):
-            keywords = []
+    keywords = data.get("keywords", [])
+    if not isinstance(keywords, list):
+        keywords = []
 
-        job_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+    with jobs_lock:
+        jobs[job_id] = {"status": "queued", "progress": 0, "results": []}
 
-        with jobs_lock:
-            jobs[job_id] = {
-                "status": "queued",
-                "progress": 0,
-                "results": []
-            }
+    t = threading.Thread(target=process_job, args=(job_id, keywords), daemon=True)
+    t.start()
 
-        t = threading.Thread(target=process_job, args=(job_id, keywords), daemon=True)
-        t.start()
+    return {"job_id": job_id}
 
-        return {"job_id": job_id}
-    except Exception:
-        # start가 실패해도 서버가 죽지 않게
-        job_id = str(uuid.uuid4())
-        with jobs_lock:
-            jobs[job_id] = {"status": "completed", "progress": 100, "results": []}
-        return {"job_id": job_id}
 
 @app.get("/status/{job_id}")
 def status(job_id: str):
-    try:
-        with jobs_lock:
-            job = jobs.get(job_id)
-        if not job:
-            return {"error": "not found"}
-        return job
-    except Exception:
-        return {"error": "not found"}
+    with jobs_lock:
+        job = jobs.get(job_id)
+    return job if job else {"error": "not found"}
+
 
 @app.post("/download")
 def download(data: dict = Body(...)):
-    try:
-        rows = data.get("results", [])
-        if not isinstance(rows, list):
-            rows = []
+    rows = data.get("results", [])
+    if not isinstance(rows, list):
+        rows = []
 
-        # 컬럼 순서 고정(요구한 형태)
-        fixed_rows = []
-        for r in rows:
-            fixed_rows.append({
-                "책이름": r.get("title", ""),
-                "검색량": int(r.get("total", 0) or 0),
-                "판매처개수": int(r.get("storeCount", 0) or 0),
-                "분류": r.get("grade", "B"),
-                "링크": r.get("link", "")
-            })
+    fixed_rows = []
+    for r in rows:
+        fixed_rows.append({
+            "책이름": r.get("title", ""),
+            "검색량": int(r.get("total", 0) or 0),
+            "판매처개수": int(r.get("storeCount", 0) or 0),
+            "분류": r.get("grade", "B"),
+            "링크": r.get("link", ""),
+        })
 
-        df = pd.DataFrame(fixed_rows, columns=["책이름", "검색량", "판매처개수", "분류", "링크"])
+    df = pd.DataFrame(fixed_rows, columns=["책이름", "검색량", "판매처개수", "분류", "링크"])
+    output = io.BytesIO()
+    df.to_excel(output, index=False)
+    output.seek(0)
 
-        output = io.BytesIO()
-        df.to_excel(output, index=False)
-        output.seek(0)
-
-        return StreamingResponse(
-            output,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=result.xlsx"}
-        )
-    except Exception:
-        # 다운로드도 실패해도 크래시 없이 빈 파일이라도 반환
-        df = pd.DataFrame([], columns=["책이름", "검색량", "판매처개수", "분류", "링크"])
-        output = io.BytesIO()
-        df.to_excel(output, index=False)
-        output.seek(0)
-        return StreamingResponse(
-            output,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=result.xlsx"}
-        )
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=result.xlsx"},
+    )
