@@ -56,6 +56,6 @@ app.get("/search", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 서버 실행중 ${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 서버 실행중 포트: ${PORT}`);
 });
