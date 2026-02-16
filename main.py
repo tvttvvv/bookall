@@ -8,9 +8,9 @@ import pandas as pd
 import io
 import re
 
-from fastapi import FastAPI, Query, Body
+from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,7 +20,6 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -29,25 +28,22 @@ ACCESS_KEY = os.getenv("ACCESS_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY")
 CUSTOMER_ID = os.getenv("CUSTOMER_ID")
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # -----------------------------
-# 네이버 광고 API 서명 생성
+# 네이버 광고 API 서명
 # -----------------------------
 def generate_signature(timestamp, method, uri):
     message = f"{timestamp}.{method}.{uri}"
     hash = hmac.new(
-        SECRET_KEY.encode("utf-8"),
-        message.encode("utf-8"),
+        SECRET_KEY.encode(),
+        message.encode(),
         hashlib.sha256
     )
     return base64.b64encode(hash.digest()).decode()
 
-
 # -----------------------------
-# 검색량 조회
+# 검색량
 # -----------------------------
 def get_search_volume(keyword):
 
@@ -64,37 +60,28 @@ def get_search_volume(keyword):
         "X-Signature": signature,
     }
 
-    params = {
-        "hintKeywords": keyword,
-        "showDetail": 1
-    }
-
+    params = {"hintKeywords": keyword, "showDetail": 1}
     url = "https://api.naver.com" + uri
-    response = requests.get(url, headers=headers, params=params)
 
-    if response.status_code != 200:
+    try:
+        r = requests.get(url, headers=headers, params=params)
+        data = r.json()
+        if "keywordList" not in data or not data["keywordList"]:
+            return 0
+
+        first = data["keywordList"][0]
+        pc = first.get("monthlyPcQcCnt", 0)
+        mobile = first.get("monthlyMobileQcCnt", 0)
+
+        if pc == "< 10": pc = 0
+        if mobile == "< 10": mobile = 0
+
+        return int(pc) + int(mobile)
+    except:
         return 0
-
-    data = response.json()
-
-    if "keywordList" not in data or not data["keywordList"]:
-        return 0
-
-    first = data["keywordList"][0]
-
-    pc = first.get("monthlyPcQcCnt", 0)
-    mobile = first.get("monthlyMobileQcCnt", 0)
-
-    if pc == "< 10":
-        pc = 0
-    if mobile == "< 10":
-        mobile = 0
-
-    return int(pc) + int(mobile)
-
 
 # -----------------------------
-# 판매처 개수 조회
+# 판매처 개수
 # -----------------------------
 def get_store_count(keyword):
 
@@ -104,18 +91,151 @@ def get_store_count(keyword):
         r = requests.get(url, headers=HEADERS, timeout=5)
         html = r.text
         match = re.search(r"판매처\s*(\d+)", html)
-        count = int(match.group(1)) if match else 0
-        return count
+        return int(match.group(1)) if match else 0
     except:
         return 0
 
+# -----------------------------
+# UI
+# -----------------------------
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return """
+    <html>
+    <head>
+    <title>BookVPro 통합 시스템</title>
+    <style>
+    body {font-family:Arial;padding:40px;}
+    textarea {width:600px;height:250px;}
+    table {border-collapse:collapse;margin-top:20px;}
+    th,td {border:1px solid #ccc;padding:8px;text-align:center;}
+    th {background:#222;color:#fff;}
+    select,button {padding:6px;}
+    </style>
+    </head>
+    <body>
+
+    <h2>BookVPro 통합 검색 시스템</h2>
+
+    <textarea id="keywords" placeholder="책 제목을 줄바꿈으로 입력하세요"></textarea><br><br>
+    <button onclick="startSearch()">검색 시작</button>
+    <button onclick="downloadExcel()">엑셀 다운로드</button>
+
+    <br><br>
+    정렬:
+    <select id="sort" onchange="renderTable()">
+        <option value="original">원본</option>
+        <option value="totalDesc">검색량 높은순</option>
+        <option value="totalAsc">검색량 낮은순</option>
+        <option value="Afirst">A 우선</option>
+    </select>
+
+    <table id="resultTable">
+    <tr>
+        <th>책이름</th>
+        <th>검색량</th>
+        <th>판매처개수</th>
+        <th>등급</th>
+        <th>링크</th>
+    </tr>
+    </table>
+
+    <script>
+    let results = [];
+    let originalOrder = [];
+
+    function startSearch(){
+        let lines = document.getElementById("keywords").value
+                    .split("\\n")
+                    .filter(x=>x.trim()!=="");
+
+        originalOrder = lines;
+        results = [];
+
+        Promise.all(
+            lines.map(k =>
+                fetch("/searchOne",{
+                    method:"POST",
+                    headers:{"Content-Type":"application/json"},
+                    body:JSON.stringify({keyword:k})
+                }).then(res=>res.json())
+            )
+        ).then(data=>{
+            results = data;
+            renderTable();
+        });
+    }
+
+    function getSorted(){
+        let sort = document.getElementById("sort").value;
+        let data = [...results];
+
+        if(sort==="totalDesc"){
+            data.sort((a,b)=> b.total - a.total);
+        }
+        else if(sort==="totalAsc"){
+            data.sort((a,b)=> a.total - b.total);
+        }
+        else if(sort==="Afirst"){
+            data.sort((a,b)=> a.grade.localeCompare(b.grade));
+        }
+        else{
+            data.sort((a,b)=> originalOrder.indexOf(a.title) - originalOrder.indexOf(b.title));
+        }
+
+        return data;
+    }
+
+    function renderTable(){
+        let table = document.getElementById("resultTable");
+        table.innerHTML = `
+        <tr>
+        <th>책이름</th>
+        <th>검색량</th>
+        <th>판매처개수</th>
+        <th>등급</th>
+        <th>링크</th>
+        </tr>`;
+
+        getSorted().forEach(r=>{
+            table.innerHTML += `
+            <tr>
+            <td>${r.title}</td>
+            <td>${r.total}</td>
+            <td>${r.storeCount}</td>
+            <td>${r.grade}</td>
+            <td><a href="${r.link}" target="_blank">열기</a></td>
+            </tr>`;
+        });
+    }
+
+    function downloadExcel(){
+        fetch("/download",{
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({results:getSorted()})
+        })
+        .then(res=>res.blob())
+        .then(blob=>{
+            let url = window.URL.createObjectURL(blob);
+            let a = document.createElement("a");
+            a.href = url;
+            a.download = "result.xlsx";
+            a.click();
+        });
+    }
+    </script>
+
+    </body>
+    </html>
+    """
 
 # -----------------------------
-# 단일 검색
+# 단일 검색 API
 # -----------------------------
-@app.get("/search")
-def search(keyword: str = Query(...)):
-
+@app.post("/searchOne")
+def search_one(data: dict = Body(...)):
+    keyword = data["keyword"]
     total = get_search_volume(keyword)
     count = get_store_count(keyword)
     grade = "A" if count == 0 else "B"
@@ -128,42 +248,12 @@ def search(keyword: str = Query(...)):
         "link": f"https://search.naver.com/search.naver?query={keyword}"
     }
 
-
-# -----------------------------
-# 여러 줄 일괄 검색
-# -----------------------------
-@app.post("/bulk")
-def bulk_search(data: dict = Body(...)):
-
-    keywords = data.get("keywords", [])
-    results = []
-
-    for keyword in keywords:
-        total = get_search_volume(keyword)
-        count = get_store_count(keyword)
-        grade = "A" if count == 0 else "B"
-
-        results.append({
-            "title": keyword,
-            "total": total,
-            "storeCount": count,
-            "grade": grade,
-            "link": f"https://search.naver.com/search.naver?query={keyword}"
-        })
-
-    return results
-
-
 # -----------------------------
 # 엑셀 다운로드
 # -----------------------------
 @app.post("/download")
 def download(data: dict = Body(...)):
-
-    results = data.get("results", [])
-
-    df = pd.DataFrame(results)
-
+    df = pd.DataFrame(data["results"])
     output = io.BytesIO()
     df.to_excel(output, index=False)
     output.seek(0)
