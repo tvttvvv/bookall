@@ -6,7 +6,7 @@ from urllib.parse import quote
 import requests
 from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 app = FastAPI()
 
@@ -25,7 +25,7 @@ HTML = r"""
 <h1>naverbookab</h1>
 
 <textarea id="keywords" rows="15" cols="60"
-placeholder="책 제목을 한 줄에 하나씩 입력"></textarea><br><br>
+placeholder="책 제목을 줄바꿈 또는 공백으로 입력"></textarea><br><br>
 
 <p>총 입력 건수: <span id="count">0</span></p>
 
@@ -53,15 +53,16 @@ let results = [];
 let originalOrder = [];
 
 document.getElementById("keywords").addEventListener("input", function(){
-    let lines = this.value.split("\\n").filter(x => x.trim() !== "");
+    let lines = this.value.split(/\\s+/).filter(x => x.trim() !== "");
     document.getElementById("count").innerText = lines.length;
 });
 
 function startSearch(){
     results = [];
 
+    // 🔥 모든 공백(줄바꿈, 스페이스, 탭) 기준 분리
     let lines = document.getElementById("keywords").value
-        .split("\\n")
+        .split(/\\s+/)
         .map(x => x.trim())
         .filter(x => x !== "");
 
@@ -156,28 +157,41 @@ def check_keyword(keyword: str):
         r = requests.get(url, headers=HEADERS, timeout=10)
         html = r.text
 
+        # 🔥 판매처 숫자 완전 대응 (콤마 포함)
         matches = re.findall(r"판매처\s*([0-9]+(?:,[0-9]{3})*)", html)
 
         if matches:
             nums = [int(m.replace(",", "")) for m in matches]
-            return {"keyword": keyword, "count": max(nums), "grade": "B", "link": url}
+            return {
+                "keyword": keyword,
+                "count": max(nums),
+                "grade": "B",
+                "link": url
+            }
 
-        return {"keyword": keyword, "count": 0, "grade": "A", "link": url}
+        return {
+            "keyword": keyword,
+            "count": 0,
+            "grade": "A",
+            "link": url
+        }
 
     except:
-        return {"keyword": keyword, "count": 0, "grade": "B", "link": url}
-
+        return {
+            "keyword": keyword,
+            "count": 0,
+            "grade": "B",  # 안전 모드
+            "link": url
+        }
 
 @app.get("/", response_class=HTMLResponse)
 def home():
     return HTML
 
-
 @app.post("/check")
 def check(data: dict = Body(...)):
     keyword = (data.get("keyword") or "").strip()
     return check_keyword(keyword)
-
 
 @app.post("/download")
 def download(data: dict = Body(...)):
