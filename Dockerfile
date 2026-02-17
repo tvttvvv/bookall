@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# chromium 설치
+# Chromium 설치
 RUN apt-get update && apt-get install -y \
     chromium \
     chromium-driver \
@@ -16,4 +16,5 @@ COPY . .
 ENV CHROME_BIN=/usr/bin/chromium
 ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
 
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080", "--workers", "1", "--timeout", "600"]
+# 여기 중요 👇
+CMD sh -c "gunicorn app:app --bind 0.0.0.0:${PORT:-8080} --workers 1 --timeout 600"
