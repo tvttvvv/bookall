@@ -9,7 +9,7 @@ import random
 app = Flask(__name__)
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     "Accept-Language": "ko-KR,ko;q=0.9"
 }
 
@@ -48,28 +48,33 @@ TEMPLATE = """
 {% endif %}
 """
 
-def extract_search_volume(html):
-    match = re.search(r'([\d,]+)\s*건', html)
-    if match:
-        return int(match.group(1).replace(",", ""))
+def extract_search_volume(soup):
+    try:
+        total = soup.select_one("div.title_area span")
+        if total:
+            text = total.get_text()
+            match = re.search(r'([\d,]+)', text)
+            if match:
+                return int(match.group(1).replace(",", ""))
+    except:
+        pass
     return 0
 
 def extract_seller_count(soup):
-    seller_count = 0
+    seller_total = 0
     has_card = False
 
-    # 네이버 도서 대표 카드 영역
     card = soup.select_one("div.api_subject_bx")
     if card:
         has_card = True
+
         text = card.get_text(" ", strip=True)
 
-        # 판매처 숫자 추출
-        match = re.search(r'판매처\s*(\d+)', text)
-        if match:
-            seller_count = int(match.group(1))
+        matches = re.findall(r'판매처\s*(\d+)', text)
+        for m in matches:
+            seller_total += int(m)
 
-    return seller_count, has_card
+    return seller_total, has_card
 
 def analyze_keyword(keyword):
     encoded = urllib.parse.quote(keyword)
@@ -77,13 +82,11 @@ def analyze_keyword(keyword):
 
     try:
         res = requests.get(url, headers=HEADERS, timeout=10)
-        html = res.text
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(res.text, "html.parser")
 
-        search_volume = extract_search_volume(html)
+        search_volume = extract_search_volume(soup)
         seller_count, has_card = extract_seller_count(soup)
 
-        # 분류 기준
         if seller_count == 0 and not has_card:
             grade = "A"
         else:
@@ -126,8 +129,7 @@ def home():
             progress = i + 1
             remaining = total - progress
 
-            # 차단 방지 딜레이
-            time.sleep(random.uniform(1.0, 2.0))
+            time.sleep(random.uniform(1.2, 2.0))
 
     return render_template_string(
         TEMPLATE,
