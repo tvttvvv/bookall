@@ -1,7 +1,5 @@
 from flask import Flask, request, render_template_string, send_file
 import requests
-import time
-import os
 import pandas as pd
 import io
 import re
@@ -13,15 +11,9 @@ MAX_WORKERS = 5
 results_storage = []
 
 # =========================
-# 검색량 (광고 API 없으면 0)
+# 네이버 모바일 검색 HTML 가져오기
 # =========================
-def get_search_volume(keyword):
-    return 0  # 검색량은 일단 유지 (필요하면 다시 추가)
-
-# =========================
-# 판매처 개수 직접 추출 (모바일 검색 기준)
-# =========================
-def get_seller_count(keyword):
+def get_mobile_html(keyword):
     try:
         url = "https://m.search.naver.com/search.naver"
         params = {"query": keyword}
@@ -31,24 +23,40 @@ def get_seller_count(keyword):
         }
 
         r = requests.get(url, params=params, headers=headers, timeout=10)
-        html = r.text
+        return r.text
 
-        # "도서 판매처 198" 패턴 찾기
+    except:
+        return ""
+
+# =========================
+# 판매처 개수 추출
+# =========================
+def extract_seller_count(html):
+    try:
         match = re.search(r"도서 판매처\s*([0-9,]+)", html)
-
         if match:
             return int(match.group(1).replace(",", ""))
-
         return 0
-
     except:
         return 0
 
 # =========================
-# 분류 기준
+# 대표 카드 존재 여부 판별
 # =========================
-def classify(seller_count):
-    if seller_count == 0:
+def check_represent_card(html):
+    try:
+        # 대표 도서 카드 블록 패턴
+        if "api_subject_bx" in html and "book" in html:
+            return True
+        return False
+    except:
+        return False
+
+# =========================
+# 분류
+# =========================
+def classify(seller_count, has_card):
+    if seller_count == 0 or not has_card:
         return "A"
     else:
         return "B"
@@ -57,12 +65,15 @@ def classify(seller_count):
 # 키워드 처리
 # =========================
 def process_keyword(keyword):
-    seller = get_seller_count(keyword)
-    grade = classify(seller)
+    html = get_mobile_html(keyword)
+    seller_count = extract_seller_count(html)
+    has_card = check_represent_card(html)
+
+    grade = classify(seller_count, has_card)
 
     return {
         "keyword": keyword,
-        "seller_count": seller,
+        "seller_count": seller_count,
         "grade": grade,
         "link": f"https://search.naver.com/search.naver?query={keyword}"
     }
