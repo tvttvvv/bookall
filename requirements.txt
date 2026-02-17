@@ -1,5 +1,6 @@
-flask
-gunicorn
+fastapi
+uvicorn
 requests
 pandas
+openpyxl
 python-dotenv
