@@ -25,7 +25,7 @@ MAX_WORKERS = 5
 results_storage = []
 
 # =========================
-# 네이버 검색광고 서명 생성
+# 네이버 광고 API 서명 생성
 # =========================
 def generate_signature(timestamp, method, uri):
     message = f"{timestamp}.{method}.{uri}"
@@ -43,7 +43,6 @@ def get_search_volume(keyword):
     uri = "/keywordstool"
     method = "GET"
     timestamp = str(int(time.time() * 1000))
-
     signature = generate_signature(timestamp, method, uri)
 
     headers = {
@@ -60,7 +59,6 @@ def get_search_volume(keyword):
     }
 
     url = "https://api.searchad.naver.com/keywordstool"
-
     r = requests.get(url, headers=headers, params=params)
 
     if r.status_code == 200:
@@ -74,7 +72,7 @@ def get_search_volume(keyword):
     return 0
 
 # =========================
-# 판매처 개수 (쇼핑 API)
+# 판매처 개수 (네이버 쇼핑 total)
 # =========================
 def get_seller_count(keyword):
     url = "https://openapi.naver.com/v1/search/shop.json"
@@ -97,17 +95,13 @@ def get_seller_count(keyword):
     return 0
 
 # =========================
-# 분류 기준
+# A / B 분류 기준
 # =========================
 def classify(volume, seller):
-    if volume >= 10000 and seller < 500:
-        return "S"
-    elif volume >= 3000:
+    if volume >= 3000 and seller < 300:
         return "A"
-    elif volume >= 1000:
-        return "B"
     else:
-        return "C"
+        return "B"
 
 # =========================
 # 키워드 처리
@@ -163,7 +157,7 @@ placeholder="책 제목을 한 줄에 하나씩 입력 (최대 1000개)"></texta
 {% endfor %}
 </table>
 
-<br>
+<br><br>
 <a href="/download">엑셀 다운로드</a>
 {% endif %}
 """
@@ -186,8 +180,10 @@ def home():
             for future in as_completed(futures):
                 results_storage.append(future.result())
 
-        # 🔥 검색량 기준 정렬
-        results_storage.sort(key=lambda x: x["total_search"], reverse=True)
+        # A 먼저 → 검색량 많은 순
+        results_storage.sort(
+            key=lambda x: (x["grade"] != "A", -x["total_search"])
+        )
 
         return render_template_string(HTML, results=results_storage)
 
