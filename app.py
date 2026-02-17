@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, request, jsonify, send_file
+from flask import Flask, render_template_string, request, send_file
 import requests
 import re
 import time
@@ -10,7 +10,6 @@ app = Flask(__name__)
 
 MAX_WORKERS = 10
 results_storage = []
-progress_data = {"done": 0, "total": 0, "start": 0}
 
 HTML = """
 <!doctype html>
@@ -43,7 +42,7 @@ placeholder="책 제목을 한 줄에 하나씩 입력 (최대 1000개)"></texta
 <table border="1" id="resultTable">
 <tr>
 <th>키워드</th>
-<th>검색결과총합</th>
+<th>검색량총합</th>
 <th>판매처개수</th>
 <th>분류</th>
 <th>링크</th>
@@ -52,7 +51,7 @@ placeholder="책 제목을 한 줄에 하나씩 입력 (최대 1000개)"></texta
 {% for r in results %}
 <tr>
 <td>{{ r.keyword }}</td>
-<td>{{ r.total_count }}</td>
+<td>{{ r.search_volume }}</td>
 <td>{{ r.seller_count }}</td>
 <td>{{ r.grade }}</td>
 <td><a href="{{ r.link }}" target="_blank">열기</a></td>
@@ -100,15 +99,15 @@ def check_keyword(keyword):
     except:
         return {
             "keyword": keyword,
-            "total_count": 0,
+            "search_volume": 0,
             "seller_count": 0,
             "grade": "B",
             "link": url
         }
 
-    # 🔎 검색결과총합 추출 (약 123,456개)
+    # 🔎 검색량 총합 추출
     total_match = re.search(r"약\s*([\d,]+)개", html)
-    total_count = int(total_match.group(1).replace(",", "")) if total_match else 0
+    search_volume = int(total_match.group(1).replace(",", "")) if total_match else 0
 
     # 🔎 판매처 숫자 추출
     seller_match = re.search(r"판매처\s*(\d+)", html)
@@ -118,7 +117,7 @@ def check_keyword(keyword):
 
     return {
         "keyword": keyword,
-        "total_count": total_count,
+        "search_volume": search_volume,
         "seller_count": seller_count,
         "grade": grade,
         "link": url
@@ -136,17 +135,11 @@ def home():
         keywords = request.form.get("keywords","").splitlines()
         keywords = [k.strip() for k in keywords if k.strip()][:1000]
 
-        progress_data["done"] = 0
-        progress_data["total"] = len(keywords)
-        progress_data["start"] = time.time()
-
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = [executor.submit(check_keyword, k) for k in keywords]
 
             for future in as_completed(futures):
-                result = future.result()
-                results_storage.append(result)
-                progress_data["done"] += 1
+                results_storage.append(future.result())
 
         total_time = round(time.time() - start,2)
 
