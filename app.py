@@ -93,43 +93,28 @@ def get_search_volume(keyword):
         return 0
 
 # =========================
-# 판매처 개수 (네이버 도서 검색 기준)
+# 네이버 검색 화면 기준 A/B 분류
 # =========================
-def get_seller_count(keyword):
+def check_naver_card(keyword):
     try:
-        if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
-            return 0
-
-        url = "https://openapi.naver.com/v1/search/book.json"
+        url = "https://search.naver.com/search.naver"
+        params = {"query": keyword}
 
         headers = {
-            "X-Naver-Client-Id": NAVER_CLIENT_ID,
-            "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; Mobile)"
         }
 
-        params = {
-            "query": keyword,
-            "display": 1
-        }
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        html = r.text
 
-        r = requests.get(url, headers=headers, params=params, timeout=10)
-
-        if r.status_code != 200:
-            return 0
-
-        return r.json().get("total", 0)
+        # 대표 도서 카드 존재 여부 판단
+        if "도서 판매처" in html:
+            return "B"
+        else:
+            return "A"
 
     except:
-        return 0
-
-# =========================
-# A / B 분류
-# =========================
-def classify(volume, seller):
-    if volume >= 3000 and seller < 300:
         return "A"
-    else:
-        return "B"
 
 # =========================
 # 키워드 처리
@@ -137,13 +122,11 @@ def classify(volume, seller):
 def process_keyword(keyword):
     try:
         volume = get_search_volume(keyword)
-        seller = get_seller_count(keyword)
-        grade = classify(volume, seller)
+        grade = check_naver_card(keyword)
 
         return {
             "keyword": keyword,
             "total_search": volume,
-            "seller_count": seller,
             "grade": grade,
             "link": f"https://search.naver.com/search.naver?query={keyword}"
         }
@@ -151,8 +134,7 @@ def process_keyword(keyword):
         return {
             "keyword": keyword,
             "total_search": 0,
-            "seller_count": 0,
-            "grade": "B",
+            "grade": "A",
             "link": f"https://search.naver.com/search.naver?query={keyword}"
         }
 
@@ -166,7 +148,7 @@ HTML = """
 
 <form method="POST">
 <textarea name="keywords" rows="10" cols="60"
-placeholder="책 제목을 한 줄에 하나씩 입력 (최대 1000개)"></textarea><br><br>
+placeholder="책 제목을 한 줄에 하나씩 입력"></textarea><br><br>
 <button type="submit">일괄 분류 시작</button>
 </form>
 
@@ -178,7 +160,6 @@ placeholder="책 제목을 한 줄에 하나씩 입력 (최대 1000개)"></texta
 <tr>
 <th>키워드</th>
 <th>총검색량</th>
-<th>판매처개수</th>
 <th>분류</th>
 <th>링크</th>
 </tr>
@@ -187,7 +168,6 @@ placeholder="책 제목을 한 줄에 하나씩 입력 (최대 1000개)"></texta
 <tr>
 <td>{{ r.keyword }}</td>
 <td>{{ "{:,}".format(r.total_search) }}</td>
-<td>{{ "{:,}".format(r.seller_count) }}</td>
 <td>{{ r.grade }}</td>
 <td><a href="{{ r.link }}" target="_blank">열기</a></td>
 </tr>
@@ -220,10 +200,8 @@ def home():
                 except:
                     pass
 
-        # A 먼저 → 검색량 높은 순
-        results_storage.sort(
-            key=lambda x: (x["grade"] != "A", -x["total_search"])
-        )
+        # A 먼저 정렬
+        results_storage.sort(key=lambda x: x["grade"])
 
         return render_template_string(HTML, results=results_storage)
 
