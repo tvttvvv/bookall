@@ -1,17 +1,97 @@
 from flask import Flask, request, render_template_string, send_file
 import requests
+import time
+import os
 import pandas as pd
 import io
+import hashlib
+import hmac
+import base64
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
 
+# =========================
+# 환경변수
+# =========================
+ACCESS_KEY = os.getenv("ACCESS_KEY") or ""
+SECRET_KEY = os.getenv("SECRET_KEY") or ""
+CUSTOMER_ID = os.getenv("CUSTOMER_ID") or ""
+
 MAX_WORKERS = 5
 results_storage = []
 
 # =========================
-# 모바일 검색 HTML 가져오기
+# 광고 API 서명 생성
+# =========================
+def generate_signature(timestamp, method, uri):
+    try:
+        message = f"{timestamp}.{method}.{uri}"
+        hash = hmac.new(
+            SECRET_KEY.encode("utf-8"),
+            message.encode("utf-8"),
+            hashlib.sha256
+        )
+        return base64.b64encode(hash.digest()).decode()
+    except:
+        return ""
+
+# =========================
+# 검색량 가져오기 (복구)
+# =========================
+def get_search_volume(keyword):
+    try:
+        if not ACCESS_KEY or not SECRET_KEY or not CUSTOMER_ID:
+            return 0
+
+        uri = "/keywordstool"
+        method = "GET"
+        timestamp = str(int(time.time() * 1000))
+        signature = generate_signature(timestamp, method, uri)
+
+        headers = {
+            "Content-Type": "application/json; charset=UTF-8",
+            "X-Timestamp": timestamp,
+            "X-API-KEY": ACCESS_KEY,
+            "X-Customer": CUSTOMER_ID,
+            "X-Signature": signature,
+        }
+
+        params = {
+            "hintKeywords": keyword,
+            "showDetail": 1
+        }
+
+        url = "https://api.searchad.naver.com/keywordstool"
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+
+        if r.status_code != 200:
+            return 0
+
+        data = r.json()
+        if not data.get("keywordList"):
+            return 0
+
+        item = data["keywordList"][0]
+
+        def safe_int(v):
+            if v is None:
+                return 0
+            if isinstance(v, str) and "<" in v:
+                return 0
+            return int(v)
+
+        pc = safe_int(item.get("monthlyPcQcCnt"))
+        mobile = safe_int(item.get("monthlyMobileQcCnt"))
+
+        return pc + mobile
+
+    except:
+        return 0
+
+# =========================
+# 모바일 검색 HTML
 # =========================
 def get_mobile_html(keyword):
     try:
@@ -24,12 +104,11 @@ def get_mobile_html(keyword):
 
         r = requests.get(url, params=params, headers=headers, timeout=10)
         return r.text
-
     except:
         return ""
 
 # =========================
-# 판매처 개수 추출
+# 판매처 숫자 추출
 # =========================
 def extract_seller_count(html):
     try:
@@ -41,19 +120,16 @@ def extract_seller_count(html):
         return 0
 
 # =========================
-# 대표 카드 존재 여부
+# 대표카드 존재 여부 (내부 판별용)
 # =========================
-def check_represent_card(html):
+def has_represent_card(html):
     try:
-        # 모바일 도서 대표 카드 블록 패턴
-        if "api_subject_bx" in html and "book" in html:
-            return True
-        return False
+        return "api_subject_bx" in html and "book" in html
     except:
         return False
 
 # =========================
-# 최종 분류 기준
+# 분류 기준
 # =========================
 def classify(seller_count, has_card):
     if seller_count == 0 and not has_card:
@@ -65,19 +141,29 @@ def classify(seller_count, has_card):
 # 키워드 처리
 # =========================
 def process_keyword(keyword):
-    html = get_mobile_html(keyword)
-    seller_count = extract_seller_count(html)
-    has_card = check_represent_card(html)
+    try:
+        volume = get_search_volume(keyword)
+        html = get_mobile_html(keyword)
+        seller_count = extract_seller_count(html)
+        card = has_represent_card(html)
 
-    grade = classify(seller_count, has_card)
+        grade = classify(seller_count, card)
 
-    return {
-        "keyword": keyword,
-        "seller_count": seller_count,
-        "has_card": has_card,
-        "grade": grade,
-        "link": f"https://search.naver.com/search.naver?query={keyword}"
-    }
+        return {
+            "keyword": keyword,
+            "total_search": volume,
+            "seller_count": seller_count,
+            "grade": grade,
+            "link": f"https://search.naver.com/search.naver?query={keyword}"
+        }
+    except:
+        return {
+            "keyword": keyword,
+            "total_search": 0,
+            "seller_count": 0,
+            "grade": "A",
+            "link": f"https://search.naver.com/search.naver?query={keyword}"
+        }
 
 # =========================
 # HTML
@@ -100,8 +186,8 @@ placeholder="책 제목을 한 줄에 하나씩 입력"></textarea><br><br>
 <table border="1" cellpadding="5">
 <tr>
 <th>키워드</th>
+<th>총검색량</th>
 <th>판매처개수</th>
-<th>대표카드</th>
 <th>분류</th>
 <th>링크</th>
 </tr>
@@ -109,8 +195,8 @@ placeholder="책 제목을 한 줄에 하나씩 입력"></textarea><br><br>
 {% for r in results %}
 <tr>
 <td>{{ r.keyword }}</td>
+<td>{{ "{:,}".format(r.total_search) }}</td>
 <td>{{ "{:,}".format(r.seller_count) }}</td>
-<td>{{ "있음" if r.has_card else "없음" }}</td>
 <td>{{ r.grade }}</td>
 <td><a href="{{ r.link }}" target="_blank">열기</a></td>
 </tr>
