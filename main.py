@@ -1,191 +1,111 @@
-from flask import Flask, render_template_string, request, jsonify, send_file
+from fastapi import FastAPI, BackgroundTasks
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
 import requests
-import os
-import time
-import threading
-import re
+from bs4 import BeautifulSoup
 import pandas as pd
-import io
+import time
+import os
 
-app = Flask(__name__)
+app = FastAPI()
 
-NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID")
-NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET")
-
-jobs = {}
-
-HTML = """
-<!doctype html>
-<title>naverbookbot</title>
-<h1>naverbookbot</h1>
-
-<textarea id="keywords" rows="15" cols="60"
-placeholder="한 줄에 하나씩 입력 (최대 1000개)"></textarea><br><br>
-
-<button onclick="startSearch()">검색 시작</button>
-<p id="count"></p>
-<p id="progress"></p>
-
-<div id="result"></div>
-
-<script>
-function startSearch(){
-    let keywords = document.getElementById("keywords").value;
-    let list = keywords.split("\\n").filter(k => k.trim() !== "");
-    document.getElementById("count").innerText = "총 입력 건수: " + list.length;
-
-    fetch("/start", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({keywords:list})
-    }).then(res=>res.json())
-    .then(data=>{
-        checkStatus(data.job_id);
-    });
+job = {
+    "total": 0,
+    "done": 0,
+    "results": [],
+    "start_time": None
 }
 
-function checkStatus(job_id){
-    let interval = setInterval(()=>{
-        fetch("/status?job_id="+job_id)
-        .then(res=>res.json())
-        .then(data=>{
-            document.getElementById("progress").innerText =
-            "진행률: "+data.done+"/"+data.total+
-            " | 예상 남은시간: "+data.remaining+"초";
+class InputData(BaseModel):
+    keywords: list[str]
 
-            if(data.finished){
-                clearInterval(interval);
-                loadResult(job_id);
-            }
-        });
-    },1000);
-}
 
-function loadResult(job_id){
-    fetch("/result?job_id="+job_id)
-    .then(res=>res.text())
-    .then(html=>{
-        document.getElementById("result").innerHTML = html;
-    });
-}
-</script>
-"""
-
-def get_search_volume(keyword):
-    url = "https://api.naver.com/keywordstool"
-    headers = {
-        "X-Naver-Client-Id": NAVER_CLIENT_ID,
-        "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
-    }
-    params = {"hintKeywords": keyword, "showDetail": 1}
-
-    try:
-        r = requests.get(url, headers=headers, params=params, timeout=5)
-        data = r.json()
-        if data["keywordList"]:
-            pc = int(data["keywordList"][0]["monthlyPcQcCnt"])
-            mobile = int(data["keywordList"][0]["monthlyMobileQcCnt"])
-            return pc + mobile
-    except:
-        pass
-    return 0
-
-def has_seller(keyword):
-    url = "https://search.naver.com/search.naver"
+def check_seller_count(keyword):
+    url = "https://search.shopping.naver.com/search/all"
     params = {"query": keyword}
+
     try:
-        r = requests.get(url, params=params, timeout=5)
-        html = r.text
-        if re.search(r"판매처\s*\d+", html):
-            return True
+        res = requests.get(url, params=params, timeout=10)
+        html = res.text
+        soup = BeautifulSoup(html, "html.parser")
     except:
-        pass
-    return False
+        return keyword, 0, "B"
 
-def worker(job_id, keywords):
-    results = []
-    total = len(keywords)
-    start_time = time.time()
+    text = soup.get_text()
 
-    for idx, keyword in enumerate(keywords):
-        volume = get_search_volume(keyword)
-        seller = has_seller(keyword)
+    seller_count = 0
 
+    # 판매처 숫자 탐지
+    import re
+    matches = re.findall(r"판매처\s?(\d+)", text)
+
+    if matches:
+        seller_count = int(matches[0])
+
+    if seller_count == 0:
+        grade = "A"
+    else:
         grade = "B"
-        if not seller:
-            grade = "A"
 
-        results.append({
-            "keyword": keyword,
-            "volume": volume,
-            "grade": grade
-        })
+    return keyword, seller_count, grade
 
-        jobs[job_id]["done"] = idx+1
-        elapsed = time.time() - start_time
-        avg = elapsed / (idx+1)
-        remaining = round(avg * (total - (idx+1)),1)
-        jobs[job_id]["remaining"] = remaining
 
-        time.sleep(0.2)  # 과부하 방지
+def run_job(keywords):
+    job["total"] = len(keywords)
+    job["done"] = 0
+    job["results"] = []
+    job["start_time"] = time.time()
 
-    jobs[job_id]["results"] = results
-    jobs[job_id]["finished"] = True
+    for kw in keywords:
+        result = check_seller_count(kw)
+        job["results"].append(result)
+        job["done"] += 1
 
-@app.route("/")
-def home():
-    return HTML
 
-@app.route("/start", methods=["POST"])
-def start():
-    data = request.json
-    keywords = data["keywords"][:1000]
+@app.post("/start")
+def start(data: InputData, background_tasks: BackgroundTasks):
+    background_tasks.add_task(run_job, data.keywords)
+    return {"status": "started"}
 
-    job_id = str(time.time())
-    jobs[job_id] = {
-        "done":0,
-        "total":len(keywords),
-        "remaining":0,
-        "finished":False,
-        "results":[]
+
+@app.get("/progress")
+def progress():
+    total = job["total"]
+    done = job["done"]
+
+    if done == 0:
+        remaining = 0
+    else:
+        elapsed = time.time() - job["start_time"]
+        avg = elapsed / done
+        remaining = int(avg * (total - done))
+
+    return {
+        "total": total,
+        "done": done,
+        "remaining_seconds": remaining
     }
 
-    t = threading.Thread(target=worker, args=(job_id, keywords))
-    t.start()
 
-    return jsonify({"job_id":job_id})
+@app.get("/results")
+def results(order: str = "original"):
+    data = job["results"]
 
-@app.route("/status")
-def status():
-    job_id = request.args.get("job_id")
-    job = jobs[job_id]
-    return jsonify(job)
+    if order == "A":
+        data = sorted(data, key=lambda x: (x[2] != "A", x[1]))
 
-@app.route("/result")
-def result():
-    job_id = request.args.get("job_id")
-    results = jobs[job_id]["results"]
+    return data
 
-    df = pd.DataFrame(results)
-    df = df.sort_values(by=["grade","volume"], ascending=[True,False])
 
-    html = df.to_html(index=False)
-    return html
+@app.get("/download")
+def download(order: str = "original"):
+    data = job["results"]
 
-@app.route("/download")
-def download():
-    job_id = request.args.get("job_id")
-    results = jobs[job_id]["results"]
+    if order == "A":
+        data = sorted(data, key=lambda x: (x[2] != "A", x[1]))
 
-    df = pd.DataFrame(results)
+    df = pd.DataFrame(data, columns=["키워드", "판매처수", "분류"])
+    file_path = "result.xlsx"
+    df.to_excel(file_path, index=False)
 
-    output = io.BytesIO()
-    df.to_excel(output, index=False)
-    output.seek(0)
-
-    return send_file(output,
-        download_name="result.xlsx",
-        as_attachment=True)
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    return FileResponse(file_path)
