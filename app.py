@@ -11,7 +11,7 @@ MAX_WORKERS = 5
 results_storage = []
 
 # =========================
-# 네이버 모바일 검색 HTML 가져오기
+# 모바일 검색 HTML 가져오기
 # =========================
 def get_mobile_html(keyword):
     try:
@@ -41,11 +41,11 @@ def extract_seller_count(html):
         return 0
 
 # =========================
-# 대표 카드 존재 여부 판별
+# 대표 카드 존재 여부
 # =========================
 def check_represent_card(html):
     try:
-        # 대표 도서 카드 블록 패턴
+        # 모바일 도서 대표 카드 블록 패턴
         if "api_subject_bx" in html and "book" in html:
             return True
         return False
@@ -53,10 +53,10 @@ def check_represent_card(html):
         return False
 
 # =========================
-# 분류
+# 최종 분류 기준
 # =========================
 def classify(seller_count, has_card):
-    if seller_count == 0 or not has_card:
+    if seller_count == 0 and not has_card:
         return "A"
     else:
         return "B"
@@ -74,6 +74,7 @@ def process_keyword(keyword):
     return {
         "keyword": keyword,
         "seller_count": seller_count,
+        "has_card": has_card,
         "grade": grade,
         "link": f"https://search.naver.com/search.naver?query={keyword}"
     }
@@ -100,6 +101,7 @@ placeholder="책 제목을 한 줄에 하나씩 입력"></textarea><br><br>
 <tr>
 <th>키워드</th>
 <th>판매처개수</th>
+<th>대표카드</th>
 <th>분류</th>
 <th>링크</th>
 </tr>
@@ -108,6 +110,7 @@ placeholder="책 제목을 한 줄에 하나씩 입력"></textarea><br><br>
 <tr>
 <td>{{ r.keyword }}</td>
 <td>{{ "{:,}".format(r.seller_count) }}</td>
+<td>{{ "있음" if r.has_card else "없음" }}</td>
 <td>{{ r.grade }}</td>
 <td><a href="{{ r.link }}" target="_blank">열기</a></td>
 </tr>
