@@ -12,90 +12,120 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 app = Flask(__name__)
 
 # =========================
-# 환경변수
+# 환경변수 (없어도 서버 안죽게 기본값 처리)
 # =========================
-ACCESS_KEY = os.getenv("ACCESS_KEY")
-SECRET_KEY = os.getenv("SECRET_KEY")
-CUSTOMER_ID = os.getenv("CUSTOMER_ID")
+ACCESS_KEY = os.getenv("ACCESS_KEY") or ""
+SECRET_KEY = os.getenv("SECRET_KEY") or ""
+CUSTOMER_ID = os.getenv("CUSTOMER_ID") or ""
 
-NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID")
-NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET")
+NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID") or ""
+NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET") or ""
 
 MAX_WORKERS = 5
 results_storage = []
 
 # =========================
-# 네이버 광고 API 서명 생성
+# 서명 생성
 # =========================
 def generate_signature(timestamp, method, uri):
-    message = f"{timestamp}.{method}.{uri}"
-    hash = hmac.new(
-        SECRET_KEY.encode("utf-8"),
-        message.encode("utf-8"),
-        hashlib.sha256
-    )
-    return base64.b64encode(hash.digest()).decode()
+    try:
+        message = f"{timestamp}.{method}.{uri}"
+        hash = hmac.new(
+            SECRET_KEY.encode("utf-8"),
+            message.encode("utf-8"),
+            hashlib.sha256
+        )
+        return base64.b64encode(hash.digest()).decode()
+    except:
+        return ""
 
 # =========================
-# 검색량 가져오기
+# 검색량 (완전 방어)
 # =========================
 def get_search_volume(keyword):
-    uri = "/keywordstool"
-    method = "GET"
-    timestamp = str(int(time.time() * 1000))
-    signature = generate_signature(timestamp, method, uri)
+    try:
+        if not ACCESS_KEY or not SECRET_KEY or not CUSTOMER_ID:
+            return 0
 
-    headers = {
-        "Content-Type": "application/json; charset=UTF-8",
-        "X-Timestamp": timestamp,
-        "X-API-KEY": ACCESS_KEY,
-        "X-Customer": CUSTOMER_ID,
-        "X-Signature": signature,
-    }
+        uri = "/keywordstool"
+        method = "GET"
+        timestamp = str(int(time.time() * 1000))
+        signature = generate_signature(timestamp, method, uri)
 
-    params = {
-        "hintKeywords": keyword,
-        "showDetail": 1
-    }
+        headers = {
+            "Content-Type": "application/json; charset=UTF-8",
+            "X-Timestamp": timestamp,
+            "X-API-KEY": ACCESS_KEY,
+            "X-Customer": CUSTOMER_ID,
+            "X-Signature": signature,
+        }
 
-    url = "https://api.searchad.naver.com/keywordstool"
-    r = requests.get(url, headers=headers, params=params)
+        params = {
+            "hintKeywords": keyword,
+            "showDetail": 1
+        }
 
-    if r.status_code == 200:
+        url = "https://api.searchad.naver.com/keywordstool"
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+
+        if r.status_code != 200:
+            return 0
+
         data = r.json()
-        if data.get("keywordList"):
-            item = data["keywordList"][0]
-            pc = int(item.get("monthlyPcQcCnt") or 0)
-            mobile = int(item.get("monthlyMobileQcCnt") or 0)
-            return pc + mobile
+        if not data.get("keywordList"):
+            return 0
 
-    return 0
+        item = data["keywordList"][0]
+
+        def safe_int(v):
+            if v is None:
+                return 0
+            if isinstance(v, str) and "<" in v:
+                return 0
+            return int(v)
+
+        pc = safe_int(item.get("monthlyPcQcCnt"))
+        mobile = safe_int(item.get("monthlyMobileQcCnt"))
+
+        return pc + mobile
+
+    except Exception as e:
+        print("검색량 오류:", e)
+        return 0
 
 # =========================
-# 판매처 개수 (네이버 쇼핑 total)
+# 판매처 개수 (완전 방어)
 # =========================
 def get_seller_count(keyword):
-    url = "https://openapi.naver.com/v1/search/shop.json"
+    try:
+        if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
+            return 0
 
-    headers = {
-        "X-Naver-Client-Id": NAVER_CLIENT_ID,
-        "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
-    }
+        url = "https://openapi.naver.com/v1/search/shop.json"
 
-    params = {
-        "query": keyword,
-        "display": 1
-    }
+        headers = {
+            "X-Naver-Client-Id": NAVER_CLIENT_ID,
+            "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
+        }
 
-    r = requests.get(url, headers=headers, params=params)
+        params = {
+            "query": keyword,
+            "display": 1
+        }
 
-    if r.status_code == 200:
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+
+        if r.status_code != 200:
+            return 0
+
         return r.json().get("total", 0)
 
-    return 0
+    except Exception as e:
+        print("판매처 오류:", e)
+        return 0
 
 # =========================
-# A / B 분류 기준
+# A/B 분류
 # =========================
 def classify(volume, seller):
     if volume >= 3000 and seller < 300:
@@ -107,17 +137,27 @@ def classify(volume, seller):
 # 키워드 처리
 # =========================
 def process_keyword(keyword):
-    volume = get_search_volume(keyword)
-    seller = get_seller_count(keyword)
-    grade = classify(volume, seller)
+    try:
+        volume = get_search_volume(keyword)
+        seller = get_seller_count(keyword)
+        grade = classify(volume, seller)
 
-    return {
-        "keyword": keyword,
-        "total_search": volume,
-        "seller_count": seller,
-        "grade": grade,
-        "link": f"https://search.shopping.naver.com/search/all?query={keyword}"
-    }
+        return {
+            "keyword": keyword,
+            "total_search": volume,
+            "seller_count": seller,
+            "grade": grade,
+            "link": f"https://search.shopping.naver.com/search/all?query={keyword}"
+        }
+    except Exception as e:
+        print("process 에러:", e)
+        return {
+            "keyword": keyword,
+            "total_search": 0,
+            "seller_count": 0,
+            "grade": "B",
+            "link": f"https://search.shopping.naver.com/search/all?query={keyword}"
+        }
 
 # =========================
 # HTML
@@ -178,9 +218,12 @@ def home():
             futures = [executor.submit(process_keyword, k) for k in keywords]
 
             for future in as_completed(futures):
-                results_storage.append(future.result())
+                try:
+                    results_storage.append(future.result())
+                except Exception as e:
+                    print("future 오류:", e)
 
-        # A 먼저 → 검색량 많은 순
+        # A 먼저 → 검색량 높은 순
         results_storage.sort(
             key=lambda x: (x["grade"] != "A", -x["total_search"])
         )
@@ -194,17 +237,19 @@ def home():
 # =========================
 @app.route("/download")
 def download():
-    df = pd.DataFrame(results_storage)
+    try:
+        df = pd.DataFrame(results_storage)
+        output = io.BytesIO()
+        df.to_excel(output, index=False)
+        output.seek(0)
 
-    output = io.BytesIO()
-    df.to_excel(output, index=False)
-    output.seek(0)
-
-    return send_file(
-        output,
-        download_name="book_analysis.xlsx",
-        as_attachment=True
-    )
+        return send_file(
+            output,
+            download_name="book_analysis.xlsx",
+            as_attachment=True
+        )
+    except Exception as e:
+        return f"엑셀 생성 오류: {e}"
 
 # =========================
 if __name__ == "__main__":
