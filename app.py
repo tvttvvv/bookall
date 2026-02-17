@@ -1,20 +1,20 @@
 from flask import Flask, request, jsonify, render_template_string
-import requests
-import time
 import os
+import time
+import requests
+import re
 import hashlib
 import hmac
 import base64
-import re
-from concurrent.futures import ThreadPoolExecutor
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
 
 app = Flask(__name__)
 
 ACCESS_KEY = os.getenv("ACCESS_KEY")
 SECRET_KEY = os.getenv("SECRET_KEY")
 CUSTOMER_ID = os.getenv("CUSTOMER_ID")
-
-MAX_WORKERS = 3
 
 # =========================
 # 광고 API
@@ -72,27 +72,29 @@ def get_search_volume(keyword):
         return 0
 
 # =========================
-# 네이버 내부 JSON에서 판매처 추출
+# Selenium 판매처 추출
 # =========================
 def get_seller_count(keyword):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(
-            "https://m.search.naver.com/search.naver",
-            params={"query": keyword},
-            headers=headers,
-            timeout=10
-        )
+        chrome_options = Options()
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
 
-        html = r.text
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.get(f"https://m.search.naver.com/search.naver?query={keyword}")
+        time.sleep(2)
 
-        match = re.search(r'"saleCount":\s*([0-9]+)', html)
+        html = driver.page_source
+        driver.quit()
+
+        match = re.search(r"도서 판매처\s*([0-9,]+)", html)
         if match:
-            return int(match.group(1))
+            return int(match.group(1).replace(",", ""))
 
         return 0
 
-    except:
+    except Exception as e:
         return 0
 
 # =========================
@@ -100,42 +102,42 @@ def get_seller_count(keyword):
 # =========================
 def has_represent_card(keyword):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(
-            "https://m.search.naver.com/search.naver",
-            params={"query": keyword},
-            headers=headers,
-            timeout=10
-        )
-        html = r.text
+        chrome_options = Options()
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.get(f"https://m.search.naver.com/search.naver?query={keyword}")
+        time.sleep(2)
+
+        html = driver.page_source
+        driver.quit()
+
         return "api_subject_bx" in html and "book" in html
+
     except:
         return False
 
-# =========================
-# 분류
-# =========================
 def classify(seller, card):
     if seller == 0 and not card:
         return "A"
     return "B"
 
 # =========================
-# HTML
+# UI
 # =========================
 HTML = """
 <!doctype html>
-<title>Book 분석기</title>
+<title>Book 통합 분석기</title>
 <h2>Book 통합 분석기</h2>
 
-<textarea id="keywords" rows="8" cols="60"
-placeholder="책 제목을 한 줄에 하나씩 입력"></textarea><br><br>
-
+<textarea id="keywords" rows="8" cols="60"></textarea><br><br>
 <button onclick="startSearch()">일괄 분류 시작</button>
 
 <div id="progress"></div>
 
-<table border="1" cellpadding="5" id="resultTable" style="margin-top:20px;">
+<table border="1" cellpadding="5" id="resultTable">
 <tr>
 <th>키워드</th>
 <th>총검색량</th>
@@ -154,10 +156,9 @@ async function startSearch() {
     table.innerHTML = "<tr><th>키워드</th><th>총검색량</th><th>판매처개수</th><th>분류</th></tr>";
 
     for (let i = 0; i < keywords.length; i++) {
-
         document.getElementById("progress").innerHTML =
-            "진행중... " + (i+1) + " / " + keywords.length +
-            " (남은 개수: " + (keywords.length - i - 1) + ")";
+            "진행중: " + (i+1) + " / " + keywords.length +
+            " | 남은 개수: " + (keywords.length - i - 1);
 
         const res = await fetch("/analyze", {
             method: "POST",
@@ -188,8 +189,7 @@ def home():
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    data = request.json
-    keyword = data["keyword"]
+    keyword = request.json["keyword"]
 
     volume = get_search_volume(keyword)
     seller = get_seller_count(keyword)
