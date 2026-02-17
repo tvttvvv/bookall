@@ -1,254 +1,191 @@
-# main.py
+from flask import Flask, render_template_string, request, jsonify, send_file
+import requests
 import os
 import time
-import re
-import io
-import uuid
 import threading
-from urllib.parse import quote
-
-import requests
+import re
 import pandas as pd
-from dotenv import load_dotenv
-from fastapi import FastAPI, Body
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+import io
 
-load_dotenv()
+app = Flask(__name__)
 
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID")
+NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET")
 
 jobs = {}
-lock = threading.Lock()
 
-UA = {"User-Agent": "Mozilla/5.0"}
-
-# -----------------------------
-# 판매처 추출
-# -----------------------------
-def extract_store_count(html):
-    try:
-        matches = re.findall(
-            r"(?:도서\s*)?판매처\s*([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)",
-            html
-        )
-        nums = []
-        for m in matches:
-            try:
-                nums.append(int(m.replace(",", "")))
-            except:
-                pass
-        if nums:
-            return max(nums)
-        return 0
-    except:
-        return 1
-
-def get_store_count(keyword):
-    try:
-        url = f"https://search.naver.com/search.naver?where=book&query={quote(keyword)}"
-        r = requests.get(url, headers=UA, timeout=10)
-        return extract_store_count(r.text)
-    except:
-        return 1
-
-# -----------------------------
-# 작업 처리
-# -----------------------------
-def process(job_id, keywords):
-
-    with lock:
-        jobs[job_id]["status"] = "running"
-        jobs[job_id]["progress"] = 0
-        jobs[job_id]["results"] = []
-
-    results = []
-    total = len(keywords)
-
-    for i, kw in enumerate(keywords):
-
-        try:
-            store = get_store_count(kw)
-            grade = "A" if store == 0 else "B"
-            row = {
-                "title": kw,
-                "total": 0,
-                "storeCount": store,
-                "grade": grade,
-                "link": f"https://search.naver.com/search.naver?where=book&query={quote(kw)}"
-            }
-        except:
-            row = {
-                "title": kw,
-                "total": 0,
-                "storeCount": 1,
-                "grade": "B",
-                "link": "#"
-            }
-
-        results.append(row)
-
-        with lock:
-            jobs[job_id]["progress"] = int(((i+1)/total)*100)
-            jobs[job_id]["results"] = results
-
-        time.sleep(0.3)
-
-    with lock:
-        jobs[job_id]["status"] = "completed"
-        jobs[job_id]["progress"] = 100
-
-# -----------------------------
-# UI
-# -----------------------------
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return """
+HTML = """
 <!doctype html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<title>BookVPro</title>
-<style>
-body{font-family:Arial;padding:40px;}
-textarea{width:700px;height:250px;}
-table{border-collapse:collapse;margin-top:20px;}
-th,td{border:1px solid #ccc;padding:8px;text-align:center;}
-th{background:#222;color:#fff;}
-.A{color:green;font-weight:bold;}
-.B{color:red;font-weight:bold;}
-</style>
-</head>
-<body>
+<title>naverbookbot</title>
+<h1>naverbookbot</h1>
 
-<h2>BookVPro 통합 검색 시스템</h2>
+<textarea id="keywords" rows="15" cols="60"
+placeholder="한 줄에 하나씩 입력 (최대 1000개)"></textarea><br><br>
 
-<textarea id="keywords" placeholder="책 제목 줄바꿈 입력"></textarea><br><br>
+<button onclick="startSearch()">검색 시작</button>
+<p id="count"></p>
+<p id="progress"></p>
 
-총 입력 권수: <b id="count">0</b><br><br>
-
-<button onclick="start()">검색 시작</button>
-<button onclick="download()">엑셀 다운로드</button>
-
-<div id="progress"></div>
-
-<table id="table">
-<tr>
-<th>책이름</th>
-<th>판매처개수</th>
-<th>분류</th>
-<th>링크</th>
-</tr>
-</table>
+<div id="result"></div>
 
 <script>
-let jobId=null;
-let results=[];
+function startSearch(){
+    let keywords = document.getElementById("keywords").value;
+    let list = keywords.split("\\n").filter(k => k.trim() !== "");
+    document.getElementById("count").innerText = "총 입력 건수: " + list.length;
 
-document.getElementById("keywords").addEventListener("input", function(){
-  let lines=this.value.split("\\n").filter(x=>x.trim()!="");
-  document.getElementById("count").innerText=lines.length;
-});
-
-function start(){
-  let lines=document.getElementById("keywords").value
-    .split("\\n").filter(x=>x.trim()!="");
-
-  fetch("/start",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({keywords:lines})
-  })
-  .then(r=>r.json())
-  .then(d=>{
-    jobId=d.job_id;
-    poll();
-  });
+    fetch("/start", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({keywords:list})
+    }).then(res=>res.json())
+    .then(data=>{
+        checkStatus(data.job_id);
+    });
 }
 
-function poll(){
-  fetch("/status/"+jobId)
-  .then(r=>r.json())
-  .then(d=>{
-    document.getElementById("progress").innerText="진행률: "+d.progress+"%";
+function checkStatus(job_id){
+    let interval = setInterval(()=>{
+        fetch("/status?job_id="+job_id)
+        .then(res=>res.json())
+        .then(data=>{
+            document.getElementById("progress").innerText =
+            "진행률: "+data.done+"/"+data.total+
+            " | 예상 남은시간: "+data.remaining+"초";
 
-    if(d.status!=="completed"){
-      setTimeout(poll,2000);
-    }else{
-      results=d.results;
-      render();
-    }
-  });
+            if(data.finished){
+                clearInterval(interval);
+                loadResult(job_id);
+            }
+        });
+    },1000);
 }
 
-function render(){
-  let table=document.getElementById("table");
-  table.innerHTML=
-  "<tr><th>책이름</th><th>판매처개수</th><th>분류</th><th>링크</th></tr>";
-
-  results.forEach(r=>{
-    table.innerHTML+=
-    "<tr>"+
-    "<td>"+r.title+"</td>"+
-    "<td>"+r.storeCount+"</td>"+
-    "<td class='"+r.grade+"'>"+r.grade+"</td>"+
-    "<td><a href='"+r.link+"' target='_blank'>열기</a></td>"+
-    "</tr>";
-  });
-}
-
-function download(){
-  fetch("/download",{
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({results:results})
-  })
-  .then(r=>r.blob())
-  .then(blob=>{
-    let url=window.URL.createObjectURL(blob);
-    let a=document.createElement("a");
-    a.href=url;
-    a.download="result.xlsx";
-    a.click();
-  });
+function loadResult(job_id){
+    fetch("/result?job_id="+job_id)
+    .then(res=>res.text())
+    .then(html=>{
+        document.getElementById("result").innerHTML = html;
+    });
 }
 </script>
-
-</body>
-</html>
 """
 
-@app.post("/start")
-def start(data: dict = Body(...)):
-    keywords=data.get("keywords",[])
-    job_id=str(uuid.uuid4())
+def get_search_volume(keyword):
+    url = "https://api.naver.com/keywordstool"
+    headers = {
+        "X-Naver-Client-Id": NAVER_CLIENT_ID,
+        "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
+    }
+    params = {"hintKeywords": keyword, "showDetail": 1}
 
-    with lock:
-        jobs[job_id]={"status":"queued","progress":0,"results":[]}
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=5)
+        data = r.json()
+        if data["keywordList"]:
+            pc = int(data["keywordList"][0]["monthlyPcQcCnt"])
+            mobile = int(data["keywordList"][0]["monthlyMobileQcCnt"])
+            return pc + mobile
+    except:
+        pass
+    return 0
 
-    threading.Thread(target=process,args=(job_id,keywords),daemon=True).start()
-    return {"job_id":job_id}
+def has_seller(keyword):
+    url = "https://search.naver.com/search.naver"
+    params = {"query": keyword}
+    try:
+        r = requests.get(url, params=params, timeout=5)
+        html = r.text
+        if re.search(r"판매처\s*\d+", html):
+            return True
+    except:
+        pass
+    return False
 
-@app.get("/status/{job_id}")
-def status(job_id:str):
-    with lock:
-        return jobs.get(job_id,{"error":"not found"})
+def worker(job_id, keywords):
+    results = []
+    total = len(keywords)
+    start_time = time.time()
 
-@app.post("/download")
-def download(data: dict = Body(...)):
-    df=pd.DataFrame(data.get("results",[]))
-    output=io.BytesIO()
-    df.to_excel(output,index=False)
+    for idx, keyword in enumerate(keywords):
+        volume = get_search_volume(keyword)
+        seller = has_seller(keyword)
+
+        grade = "B"
+        if not seller:
+            grade = "A"
+
+        results.append({
+            "keyword": keyword,
+            "volume": volume,
+            "grade": grade
+        })
+
+        jobs[job_id]["done"] = idx+1
+        elapsed = time.time() - start_time
+        avg = elapsed / (idx+1)
+        remaining = round(avg * (total - (idx+1)),1)
+        jobs[job_id]["remaining"] = remaining
+
+        time.sleep(0.2)  # 과부하 방지
+
+    jobs[job_id]["results"] = results
+    jobs[job_id]["finished"] = True
+
+@app.route("/")
+def home():
+    return HTML
+
+@app.route("/start", methods=["POST"])
+def start():
+    data = request.json
+    keywords = data["keywords"][:1000]
+
+    job_id = str(time.time())
+    jobs[job_id] = {
+        "done":0,
+        "total":len(keywords),
+        "remaining":0,
+        "finished":False,
+        "results":[]
+    }
+
+    t = threading.Thread(target=worker, args=(job_id, keywords))
+    t.start()
+
+    return jsonify({"job_id":job_id})
+
+@app.route("/status")
+def status():
+    job_id = request.args.get("job_id")
+    job = jobs[job_id]
+    return jsonify(job)
+
+@app.route("/result")
+def result():
+    job_id = request.args.get("job_id")
+    results = jobs[job_id]["results"]
+
+    df = pd.DataFrame(results)
+    df = df.sort_values(by=["grade","volume"], ascending=[True,False])
+
+    html = df.to_html(index=False)
+    return html
+
+@app.route("/download")
+def download():
+    job_id = request.args.get("job_id")
+    results = jobs[job_id]["results"]
+
+    df = pd.DataFrame(results)
+
+    output = io.BytesIO()
+    df.to_excel(output, index=False)
     output.seek(0)
 
-    return StreamingResponse(
-        output,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition":"attachment; filename=result.xlsx"}
-    )
+    return send_file(output,
+        download_name="result.xlsx",
+        as_attachment=True)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
