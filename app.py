@@ -2,7 +2,6 @@ from flask import Flask, render_template_string, request, jsonify, send_file
 import requests
 import re
 import time
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import io
@@ -44,7 +43,8 @@ placeholder="책 제목을 한 줄에 하나씩 입력 (최대 1000개)"></texta
 <table border="1" id="resultTable">
 <tr>
 <th>키워드</th>
-<th>검색결과수</th>
+<th>검색결과총합</th>
+<th>판매처개수</th>
 <th>분류</th>
 <th>링크</th>
 </tr>
@@ -52,7 +52,8 @@ placeholder="책 제목을 한 줄에 하나씩 입력 (최대 1000개)"></texta
 {% for r in results %}
 <tr>
 <td>{{ r.keyword }}</td>
-<td>{{ r.count }}</td>
+<td>{{ r.total_count }}</td>
+<td>{{ r.seller_count }}</td>
 <td>{{ r.grade }}</td>
 <td><a href="{{ r.link }}" target="_blank">열기</a></td>
 </tr>
@@ -74,13 +75,11 @@ function sortTable(){
   let rows = Array.from(table.rows).slice(1);
   let mode = document.getElementById("sortSelect").value;
 
-  rows.sort((a,b)=>{
-    if(mode === "aFirst"){
-      return a.cells[2].innerText.localeCompare(b.cells[2].innerText);
-    }else{
-      return 0;
-    }
-  });
+  if(mode === "aFirst"){
+    rows.sort((a,b)=>{
+      return a.cells[3].innerText.localeCompare(b.cells[3].innerText);
+    });
+  }
 
   rows.forEach(r => table.appendChild(r));
 }
@@ -99,17 +98,28 @@ def check_keyword(keyword):
         res = requests.get(url, timeout=10)
         html = res.text
     except:
-        return {"keyword": keyword, "count": 0, "grade": "B", "link": url}
+        return {
+            "keyword": keyword,
+            "total_count": 0,
+            "seller_count": 0,
+            "grade": "B",
+            "link": url
+        }
 
-    # 판매처 숫자 찾기
-    match = re.search(r"판매처\s*(\d+)", html)
-    count = int(match.group(1)) if match else 0
+    # 🔎 검색결과총합 추출 (약 123,456개)
+    total_match = re.search(r"약\s*([\d,]+)개", html)
+    total_count = int(total_match.group(1).replace(",", "")) if total_match else 0
 
-    grade = "B" if count > 0 else "A"
+    # 🔎 판매처 숫자 추출
+    seller_match = re.search(r"판매처\s*(\d+)", html)
+    seller_count = int(seller_match.group(1)) if seller_match else 0
+
+    grade = "B" if seller_count > 0 else "A"
 
     return {
         "keyword": keyword,
-        "count": count,
+        "total_count": total_count,
+        "seller_count": seller_count,
         "grade": grade,
         "link": url
     }
@@ -141,24 +151,6 @@ def home():
         total_time = round(time.time() - start,2)
 
     return render_template_string(HTML, results=results_storage, total_time=total_time)
-
-@app.route("/progress")
-def progress():
-    done = progress_data["done"]
-    total = progress_data["total"]
-    elapsed = time.time() - progress_data["start"] if progress_data["start"] else 0
-
-    if done > 0:
-        avg = elapsed / done
-        remain = round((total-done)*avg)
-    else:
-        remain = 0
-
-    return jsonify({
-        "done": done,
-        "total": total,
-        "remaining": remain
-    })
 
 @app.route("/download")
 def download():
