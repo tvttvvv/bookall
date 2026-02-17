@@ -7,7 +7,6 @@ import io
 import hashlib
 import hmac
 import base64
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
@@ -19,30 +18,30 @@ ACCESS_KEY = os.getenv("ACCESS_KEY") or ""
 SECRET_KEY = os.getenv("SECRET_KEY") or ""
 CUSTOMER_ID = os.getenv("CUSTOMER_ID") or ""
 
+NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID") or ""
+NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET") or ""
+
 MAX_WORKERS = 5
 results_storage = []
 
 # =========================
-# 광고 API 서명 생성
+# 광고 API 서명
 # =========================
 def generate_signature(timestamp, method, uri):
-    try:
-        message = f"{timestamp}.{method}.{uri}"
-        hash = hmac.new(
-            SECRET_KEY.encode("utf-8"),
-            message.encode("utf-8"),
-            hashlib.sha256
-        )
-        return base64.b64encode(hash.digest()).decode()
-    except:
-        return ""
+    message = f"{timestamp}.{method}.{uri}"
+    hash = hmac.new(
+        SECRET_KEY.encode("utf-8"),
+        message.encode("utf-8"),
+        hashlib.sha256
+    )
+    return base64.b64encode(hash.digest()).decode()
 
 # =========================
-# 검색량 가져오기 (복구)
+# 검색량
 # =========================
 def get_search_volume(keyword):
     try:
-        if not ACCESS_KEY or not SECRET_KEY or not CUSTOMER_ID:
+        if not ACCESS_KEY:
             return 0
 
         uri = "/keywordstool"
@@ -75,61 +74,70 @@ def get_search_volume(keyword):
 
         item = data["keywordList"][0]
 
-        def safe_int(v):
-            if v is None:
+        def safe(v):
+            if not v:
                 return 0
             if isinstance(v, str) and "<" in v:
                 return 0
             return int(v)
 
-        pc = safe_int(item.get("monthlyPcQcCnt"))
-        mobile = safe_int(item.get("monthlyMobileQcCnt"))
-
-        return pc + mobile
+        return safe(item.get("monthlyPcQcCnt")) + safe(item.get("monthlyMobileQcCnt"))
 
     except:
         return 0
 
 # =========================
-# 모바일 검색 HTML
+# 판매처 개수 (도서 API 사용)
 # =========================
-def get_mobile_html(keyword):
+def get_seller_count(keyword):
+    try:
+        if not NAVER_CLIENT_ID:
+            return 0
+
+        url = "https://openapi.naver.com/v1/search/book.json"
+
+        headers = {
+            "X-Naver-Client-Id": NAVER_CLIENT_ID,
+            "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
+        }
+
+        params = {
+            "query": keyword,
+            "display": 1
+        }
+
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+
+        if r.status_code != 200:
+            return 0
+
+        return r.json().get("total", 0)
+
+    except:
+        return 0
+
+# =========================
+# 대표카드 판별 (내부용)
+# =========================
+def has_represent_card(keyword):
     try:
         url = "https://m.search.naver.com/search.naver"
         params = {"query": keyword}
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X)"
+            "User-Agent": "Mozilla/5.0"
         }
 
         r = requests.get(url, params=params, headers=headers, timeout=10)
-        return r.text
-    except:
-        return ""
+        html = r.text
 
-# =========================
-# 판매처 숫자 추출
-# =========================
-def extract_seller_count(html):
-    try:
-        match = re.search(r"도서 판매처\s*([0-9,]+)", html)
-        if match:
-            return int(match.group(1).replace(",", ""))
-        return 0
-    except:
-        return 0
-
-# =========================
-# 대표카드 존재 여부 (내부 판별용)
-# =========================
-def has_represent_card(html):
-    try:
         return "api_subject_bx" in html and "book" in html
+
     except:
         return False
 
 # =========================
-# 분류 기준
+# 분류
 # =========================
 def classify(seller_count, has_card):
     if seller_count == 0 and not has_card:
@@ -141,29 +149,18 @@ def classify(seller_count, has_card):
 # 키워드 처리
 # =========================
 def process_keyword(keyword):
-    try:
-        volume = get_search_volume(keyword)
-        html = get_mobile_html(keyword)
-        seller_count = extract_seller_count(html)
-        card = has_represent_card(html)
+    volume = get_search_volume(keyword)
+    seller = get_seller_count(keyword)
+    card = has_represent_card(keyword)
+    grade = classify(seller, card)
 
-        grade = classify(seller_count, card)
-
-        return {
-            "keyword": keyword,
-            "total_search": volume,
-            "seller_count": seller_count,
-            "grade": grade,
-            "link": f"https://search.naver.com/search.naver?query={keyword}"
-        }
-    except:
-        return {
-            "keyword": keyword,
-            "total_search": 0,
-            "seller_count": 0,
-            "grade": "A",
-            "link": f"https://search.naver.com/search.naver?query={keyword}"
-        }
+    return {
+        "keyword": keyword,
+        "total_search": volume,
+        "seller_count": seller,
+        "grade": grade,
+        "link": f"https://search.naver.com/search.naver?query={keyword}"
+    }
 
 # =========================
 # HTML
@@ -208,9 +205,6 @@ placeholder="책 제목을 한 줄에 하나씩 입력"></textarea><br><br>
 {% endif %}
 """
 
-# =========================
-# 메인
-# =========================
 @app.route("/", methods=["GET", "POST"])
 def home():
     global results_storage
@@ -222,7 +216,6 @@ def home():
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = [executor.submit(process_keyword, k) for k in keywords]
-
             for future in as_completed(futures):
                 results_storage.append(future.result())
 
@@ -230,21 +223,13 @@ def home():
 
     return render_template_string(HTML)
 
-# =========================
-# 엑셀 다운로드
-# =========================
 @app.route("/download")
 def download():
     df = pd.DataFrame(results_storage)
     output = io.BytesIO()
     df.to_excel(output, index=False)
     output.seek(0)
-
-    return send_file(
-        output,
-        download_name="book_analysis.xlsx",
-        as_attachment=True
-    )
+    return send_file(output, download_name="book_analysis.xlsx", as_attachment=True)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
