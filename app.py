@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 app = Flask(__name__)
 
 # =========================
-# 환경변수 (없어도 서버 안 죽게)
+# 환경변수
 # =========================
 ACCESS_KEY = os.getenv("ACCESS_KEY") or ""
 SECRET_KEY = os.getenv("SECRET_KEY") or ""
@@ -25,7 +25,7 @@ MAX_WORKERS = 5
 results_storage = []
 
 # =========================
-# 광고 API 서명 생성
+# 광고 API 서명
 # =========================
 def generate_signature(timestamp, method, uri):
     try:
@@ -40,7 +40,7 @@ def generate_signature(timestamp, method, uri):
         return ""
 
 # =========================
-# 검색량 (광고 API)
+# 검색량
 # =========================
 def get_search_volume(keyword):
     try:
@@ -93,22 +93,22 @@ def get_search_volume(keyword):
         return 0
 
 # =========================
-# 네이버 검색 화면 기준 A/B 분류
+# 대표 도서 카드 판별 (모바일 검색 기준)
 # =========================
 def check_naver_card(keyword):
     try:
-        url = "https://search.naver.com/search.naver"
+        url = "https://m.search.naver.com/search.naver"
         params = {"query": keyword}
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10; Mobile)"
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X)"
         }
 
         r = requests.get(url, params=params, headers=headers, timeout=10)
         html = r.text
 
-        # 대표 도서 카드 존재 여부 판단
-        if "도서 판매처" in html:
+        # 대표 도서 카드 블록 패턴
+        if "api_subject_bx" in html and "book" in html:
             return "B"
         else:
             return "A"
@@ -117,16 +117,48 @@ def check_naver_card(keyword):
         return "A"
 
 # =========================
+# 판매처 개수 (도서 API 기준)
+# =========================
+def get_seller_count(keyword):
+    try:
+        if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
+            return 0
+
+        url = "https://openapi.naver.com/v1/search/book.json"
+
+        headers = {
+            "X-Naver-Client-Id": NAVER_CLIENT_ID,
+            "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
+        }
+
+        params = {
+            "query": keyword,
+            "display": 1
+        }
+
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+
+        if r.status_code != 200:
+            return 0
+
+        return r.json().get("total", 0)
+
+    except:
+        return 0
+
+# =========================
 # 키워드 처리
 # =========================
 def process_keyword(keyword):
     try:
         volume = get_search_volume(keyword)
+        seller = get_seller_count(keyword)
         grade = check_naver_card(keyword)
 
         return {
             "keyword": keyword,
             "total_search": volume,
+            "seller_count": seller,
             "grade": grade,
             "link": f"https://search.naver.com/search.naver?query={keyword}"
         }
@@ -134,6 +166,7 @@ def process_keyword(keyword):
         return {
             "keyword": keyword,
             "total_search": 0,
+            "seller_count": 0,
             "grade": "A",
             "link": f"https://search.naver.com/search.naver?query={keyword}"
         }
@@ -160,6 +193,7 @@ placeholder="책 제목을 한 줄에 하나씩 입력"></textarea><br><br>
 <tr>
 <th>키워드</th>
 <th>총검색량</th>
+<th>판매처개수</th>
 <th>분류</th>
 <th>링크</th>
 </tr>
@@ -168,6 +202,7 @@ placeholder="책 제목을 한 줄에 하나씩 입력"></textarea><br><br>
 <tr>
 <td>{{ r.keyword }}</td>
 <td>{{ "{:,}".format(r.total_search) }}</td>
+<td>{{ "{:,}".format(r.seller_count) }}</td>
 <td>{{ r.grade }}</td>
 <td><a href="{{ r.link }}" target="_blank">열기</a></td>
 </tr>
@@ -200,9 +235,6 @@ def home():
                 except:
                     pass
 
-        # A 먼저 정렬
-        results_storage.sort(key=lambda x: x["grade"])
-
         return render_template_string(HTML, results=results_storage)
 
     return render_template_string(HTML)
@@ -226,6 +258,5 @@ def download():
     except:
         return "엑셀 생성 오류"
 
-# =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
