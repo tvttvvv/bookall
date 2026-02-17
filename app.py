@@ -7,6 +7,7 @@ import io
 import hashlib
 import hmac
 import base64
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
@@ -21,7 +22,7 @@ CUSTOMER_ID = os.getenv("CUSTOMER_ID") or ""
 NAVER_CLIENT_ID = os.getenv("NAVER_CLIENT_ID") or ""
 NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET") or ""
 
-MAX_WORKERS = 5
+MAX_WORKERS = 3  # HTML 파싱이 느리므로 낮게 설정
 results_storage = []
 
 # =========================
@@ -87,13 +88,10 @@ def get_search_volume(keyword):
         return 0
 
 # =========================
-# 판매처 개수 (도서 API 사용)
+# 도서 상세 링크 가져오기
 # =========================
-def get_seller_count(keyword):
+def get_book_detail_link(keyword):
     try:
-        if not NAVER_CLIENT_ID:
-            return 0
-
         url = "https://openapi.naver.com/v1/search/book.json"
 
         headers = {
@@ -107,17 +105,45 @@ def get_seller_count(keyword):
         }
 
         r = requests.get(url, headers=headers, params=params, timeout=10)
-
         if r.status_code != 200:
+            return None
+
+        items = r.json().get("items", [])
+        if not items:
+            return None
+
+        return items[0].get("link")
+
+    except:
+        return None
+
+# =========================
+# 상세 페이지에서 판매처 숫자 추출
+# =========================
+def get_exact_seller_count(detail_url):
+    try:
+        if not detail_url:
             return 0
 
-        return r.json().get("total", 0)
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+
+        r = requests.get(detail_url, headers=headers, timeout=10)
+        html = r.text
+
+        # "판매처 198" 패턴
+        match = re.search(r"판매처\s*([0-9,]+)", html)
+        if match:
+            return int(match.group(1).replace(",", ""))
+
+        return 0
 
     except:
         return 0
 
 # =========================
-# 대표카드 판별 (내부용)
+# 대표카드 판별 (모바일 검색 HTML)
 # =========================
 def has_represent_card(keyword):
     try:
@@ -150,14 +176,18 @@ def classify(seller_count, has_card):
 # =========================
 def process_keyword(keyword):
     volume = get_search_volume(keyword)
-    seller = get_seller_count(keyword)
+
+    detail_link = get_book_detail_link(keyword)
+    seller_count = get_exact_seller_count(detail_link)
+
     card = has_represent_card(keyword)
-    grade = classify(seller, card)
+
+    grade = classify(seller_count, card)
 
     return {
         "keyword": keyword,
         "total_search": volume,
-        "seller_count": seller,
+        "seller_count": seller_count,
         "grade": grade,
         "link": f"https://search.naver.com/search.naver?query={keyword}"
     }
