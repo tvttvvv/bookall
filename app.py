@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 app = Flask(__name__)
 
 # =========================
-# 환경변수 (없어도 서버 안죽게 기본값 처리)
+# 환경변수 (없어도 서버 안 죽게)
 # =========================
 ACCESS_KEY = os.getenv("ACCESS_KEY") or ""
 SECRET_KEY = os.getenv("SECRET_KEY") or ""
@@ -25,7 +25,7 @@ MAX_WORKERS = 5
 results_storage = []
 
 # =========================
-# 서명 생성
+# 광고 API 서명 생성
 # =========================
 def generate_signature(timestamp, method, uri):
     try:
@@ -40,7 +40,7 @@ def generate_signature(timestamp, method, uri):
         return ""
 
 # =========================
-# 검색량 (완전 방어)
+# 검색량 (광고 API)
 # =========================
 def get_search_volume(keyword):
     try:
@@ -89,19 +89,18 @@ def get_search_volume(keyword):
 
         return pc + mobile
 
-    except Exception as e:
-        print("검색량 오류:", e)
+    except:
         return 0
 
 # =========================
-# 판매처 개수 (완전 방어)
+# 판매처 개수 (네이버 도서 검색 기준)
 # =========================
 def get_seller_count(keyword):
     try:
         if not NAVER_CLIENT_ID or not NAVER_CLIENT_SECRET:
             return 0
 
-        url = "https://openapi.naver.com/v1/search/shop.json"
+        url = "https://openapi.naver.com/v1/search/book.json"
 
         headers = {
             "X-Naver-Client-Id": NAVER_CLIENT_ID,
@@ -120,12 +119,11 @@ def get_seller_count(keyword):
 
         return r.json().get("total", 0)
 
-    except Exception as e:
-        print("판매처 오류:", e)
+    except:
         return 0
 
 # =========================
-# A/B 분류
+# A / B 분류
 # =========================
 def classify(volume, seller):
     if volume >= 3000 and seller < 300:
@@ -147,16 +145,15 @@ def process_keyword(keyword):
             "total_search": volume,
             "seller_count": seller,
             "grade": grade,
-            "link": f"https://search.shopping.naver.com/search/all?query={keyword}"
+            "link": f"https://search.naver.com/search.naver?query={keyword}"
         }
-    except Exception as e:
-        print("process 에러:", e)
+    except:
         return {
             "keyword": keyword,
             "total_search": 0,
             "seller_count": 0,
             "grade": "B",
-            "link": f"https://search.shopping.naver.com/search/all?query={keyword}"
+            "link": f"https://search.naver.com/search.naver?query={keyword}"
         }
 
 # =========================
@@ -220,8 +217,8 @@ def home():
             for future in as_completed(futures):
                 try:
                     results_storage.append(future.result())
-                except Exception as e:
-                    print("future 오류:", e)
+                except:
+                    pass
 
         # A 먼저 → 검색량 높은 순
         results_storage.sort(
@@ -248,8 +245,8 @@ def download():
             download_name="book_analysis.xlsx",
             as_attachment=True
         )
-    except Exception as e:
-        return f"엑셀 생성 오류: {e}"
+    except:
+        return "엑셀 생성 오류"
 
 # =========================
 if __name__ == "__main__":
