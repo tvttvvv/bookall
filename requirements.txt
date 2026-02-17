@@ -3,4 +3,3 @@ gunicorn
 requests
 pandas
 openpyxl
-python-dotenv
