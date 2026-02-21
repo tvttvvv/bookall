@@ -125,7 +125,7 @@ def analyze_book(keyword, fetch_isbn=False):
         grade = "오류"
         reason = "일시적 스크래핑 실패"
 
-    # 🔥 수정된 ISBN 추출 로직
+    # 🔥 완벽하게 수정된 ISBN 추출 로직
     isbn = "-"
     if grade == "B (일반)" and fetch_isbn:
         try:
@@ -133,27 +133,42 @@ def analyze_book(keyword, fetch_isbn=False):
                 "X-Naver-Client-Id": NAVER_CLIENT_ID,
                 "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
             }
-            # 판매량순(sort=count)으로 10개를 가져와서 가장 대중적인 대표 종이책을 타겟팅
-            book_api_url = f"https://openapi.naver.com/v1/search/book.json?query={urllib.parse.quote(keyword)}&display=10&sort=count"
-            book_res = requests.get(book_api_url, headers=api_headers, timeout=3)
             
+            # API가 찰떡같이 찾을 수 있게 검색어 끝의 '책' 글자 제거 (예: 오만과편견책 -> 오만과편견)
+            api_keyword = keyword
+            if api_keyword.endswith("책") and len(api_keyword) > 1:
+                api_keyword = api_keyword[:-1]
+                
+            # 가장 정확한 대표책을 가져오기 위해 넉넉하게 20개 추출 (기본값인 유사도순 정렬 사용)
+            book_api_url = f"https://openapi.naver.com/v1/search/book.json?query={urllib.parse.quote(api_keyword)}&display=20"
+            book_res = requests.get(book_api_url, headers=api_headers, timeout=5)
+            
+            items = []
             if book_res.status_code == 200:
                 items = book_res.json().get('items', [])
-                for item in items:
-                    isbn_raw = item.get('isbn', '')
-                    isbns = isbn_raw.split()
-                    
-                    found_valid = False
-                    for candidate in reversed(isbns):
-                        # 오디오북, e북(6 등)을 거르고 진짜 종이책(8, 9)만 추출
-                        if candidate.startswith('8') or candidate.startswith('9'):
-                            isbn = candidate
-                            found_valid = True
-                            break
-                    
-                    # 유효한 ISBN을 찾았다면 더 이상 찾지 않고 종료 (가장 많이 묶인 대표책)
-                    if found_valid:
+                
+            # '책'을 뺐는데도 안 나온다면 원래 키워드로 한 번 더 시도하는 안전장치
+            if not items and api_keyword != keyword:
+                book_api_url = f"https://openapi.naver.com/v1/search/book.json?query={urllib.parse.quote(keyword)}&display=20"
+                book_res = requests.get(book_api_url, headers=api_headers, timeout=5)
+                if book_res.status_code == 200:
+                    items = book_res.json().get('items', [])
+
+            for item in items:
+                isbn_raw = item.get('isbn', '')
+                isbns = isbn_raw.split()
+                
+                found_valid = False
+                for candidate in reversed(isbns):
+                    # 9 또는 8로 시작하는 진짜 종이책 ISBN (978, 979, 89 등) 만 추출!
+                    if candidate.startswith('9') or candidate.startswith('8'):
+                        isbn = candidate
+                        found_valid = True
                         break
+                
+                # 가장 연관성이 높은(대표로 묶인) 첫 번째 종이책 번호를 찾으면 즉시 스탑
+                if found_valid:
+                    break
         except Exception as e:
             print(f"ISBN API 에러: {e}")
             isbn = "조회 실패"
@@ -444,20 +459,3 @@ TEMPLATE = """
     </script>
 </body>
 </html>
-"""
-
-@app.route("/", methods=["GET"])
-def home():
-    return render_template_string(TEMPLATE)
-
-@app.route("/api/analyze", methods=["POST"])
-def api_analyze():
-    data = request.get_json()
-    keyword = data.get("keyword", "")
-    fetch_isbn = data.get("fetch_isbn", False)
-    
-    result = analyze_book(keyword, fetch_isbn=fetch_isbn)
-    return jsonify(result)
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
