@@ -31,7 +31,6 @@ def get_ad_header(method, uri):
     }
 
 def analyze_book(keyword):
-    # 1. 총 검색량 조회
     search_volume = 0
     try:
         uri = '/keywordstool'
@@ -65,7 +64,6 @@ def analyze_book(keyword):
         print(f"광고 API 에러: {e}")
         search_volume = 0
 
-    # 2. 화면 크롤링 (가장 엄격하고 정확한 PC 기준)
     pc_link = f"https://search.naver.com/search.naver?where=nexearch&query={urllib.parse.quote(keyword)}"
     grade = ""
     reason = ""
@@ -159,7 +157,7 @@ TEMPLATE = """
     </style>
 </head>
 <body>
-    <h1>📚 도서 키워드 통합 분석기 (실시간 처리)</h1>
+    <h1>📚 도서 키워드 통합 분석기 (실시간 강력 정렬)</h1>
     
     <div class="input-area">
         <textarea id="keywordInput" rows="10" cols="70" placeholder="책 제목들을 한 줄에 하나씩 입력하세요"></textarea>
@@ -214,12 +212,55 @@ TEMPLATE = """
         }
         textarea.addEventListener('input', updateCount);
 
-        // 사용자가 진행 도중에 정렬 옵션을 변경했을 때 즉시 반영
+        // 정렬 옵션이 변경될 때 즉시 재배치
         sortOptionSelect.addEventListener('change', function() {
-            if (this.value === 'grade') {
-                sortTableByGrade(false); // 알림창 없이 조용히 정렬
-            }
+            applyCurrentSort();
         });
+
+        // 현재 정렬 옵션에 맞게 표를 강력하게 재배치하는 함수
+        function applyCurrentSort() {
+            const tbody = document.getElementById('resultBody');
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            const sortOption = document.getElementById('sortOption').value;
+
+            if (sortOption === 'grade') {
+                // A등급 우선 정렬 모드
+                rows.sort((a, b) => {
+                    const textA = a.querySelector('td:nth-child(4) span').innerText;
+                    const textB = b.querySelector('td:nth-child(4) span').innerText;
+                    
+                    // A는 1점, B는 2점, 오류는 3점 부여
+                    const scoreA = textA.includes('A') ? 1 : (textA.includes('B') ? 2 : 3);
+                    const scoreB = textB.includes('A') ? 1 : (textB.includes('B') ? 2 : 3);
+                    
+                    // 점수가 같다면 (둘 다 A거나 둘 다 B면) 원래 들어온 순서대로 정렬
+                    if (scoreA === scoreB) {
+                        return parseInt(a.getAttribute('data-index')) - parseInt(b.getAttribute('data-index'));
+                    }
+                    return scoreA - scoreB;
+                });
+                
+                // 표 업데이트
+                tbody.innerHTML = '';
+                rows.forEach(row => tbody.appendChild(row));
+                
+                // 스크롤 맨 위로 올려서 A가 보이게 함
+                document.getElementById('tableContainer').scrollTop = 0;
+            } else {
+                // 원본 순서 모드
+                rows.sort((a, b) => {
+                    return parseInt(a.getAttribute('data-index')) - parseInt(b.getAttribute('data-index'));
+                });
+                
+                // 표 업데이트
+                tbody.innerHTML = '';
+                rows.forEach(row => tbody.appendChild(row));
+                
+                // 가장 최근에 검사한 책이 보이도록 스크롤을 맨 아래로 내림
+                const container = document.getElementById('tableContainer');
+                container.scrollTop = container.scrollHeight;
+            }
+        }
 
         async function startAnalysis() {
             const btn = document.getElementById('submitBtn');
@@ -246,46 +287,43 @@ TEMPLATE = """
                 const kw = keywords[i];
                 document.getElementById('progressText').innerText = `[${i + 1} / ${total}] "${kw}" 분석 중...`;
                 
+                let rowData = null;
                 try {
                     const response = await fetch('/api/analyze', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ keyword: kw })
                     });
-                    const result = await response.json();
-                    appendRow(result);
-                    
+                    rowData = await response.json();
                 } catch (error) {
-                    appendRow({
+                    rowData = {
                         keyword: kw, search_volume: 0, seller_count: "-",
                         grade: "오류", reason: "네트워크 통신 실패", link: "#"
-                    });
+                    };
                 }
 
-                // 🔥 핵심: 'A등급 우선 정렬'이 선택되어 있다면, 항목이 추가될 때마다 즉시 다시 정렬
-                if (sortOptionSelect.value === 'grade') {
-                    sortTableByGrade(false);
-                }
+                // 분석된 결과에 고유 순서(index) 부여 후 표에 추가
+                rowData.original_index = i;
+                appendRow(rowData);
 
                 const percent = Math.round(((i + 1) / total) * 100);
                 document.getElementById('progressBar').style.width = percent + '%';
                 
+                // 서버 과부하 방지 딜레이
                 await new Promise(r => setTimeout(r, 600));
             }
 
             document.getElementById('progressText').innerText = `✅ 분석 완료! (총 ${total}건)`;
             btn.disabled = false;
             btn.innerText = "일괄 분석 시작";
-
-            // 다 끝난 후 A등급 정렬이었다면 완료 알림창 한 번만 띄우기
-            if (sortOptionSelect.value === 'grade') {
-                sortTableByGrade(true);
-            }
         }
 
         function appendRow(r) {
             const tbody = document.getElementById('resultBody');
             const tr = document.createElement('tr');
+            
+            // 향후 정렬을 위해 고유 번호를 숨겨둠
+            tr.setAttribute('data-index', r.original_index);
             
             const isGradeA = r.grade.includes('A');
             if (isGradeA) tr.className = 'grade-a';
@@ -306,32 +344,8 @@ TEMPLATE = """
             `;
             tbody.appendChild(tr);
             
-            // 입력 순서(원본) 모드일 때만 스크롤을 맨 아래로 내려줌
-            if (sortOptionSelect.value === 'original') {
-                const container = document.getElementById('tableContainer');
-                container.scrollTop = container.scrollHeight;
-            }
-        }
-
-        function sortTableByGrade(showAlert = false) {
-            const tbody = document.getElementById('resultBody');
-            const rows = Array.from(tbody.querySelectorAll('tr'));
-            
-            rows.sort((a, b) => {
-                const gradeA = a.querySelector('td:nth-child(4) span').innerText;
-                const gradeB = b.querySelector('td:nth-child(4) span').innerText;
-                if (gradeA < gradeB) return -1;
-                if (gradeA > gradeB) return 1;
-                return 0;
-            });
-            
-            rows.forEach(row => tbody.appendChild(row));
-            
-            // 알림을 띄우라고 요청받았을 때(모든 작업이 끝났을 때)만 스크롤 맨 위로 & 알림창 표시
-            if (showAlert) {
-                document.getElementById('tableContainer').scrollTop = 0;
-                alert("분석 완료! A등급 우선으로 표가 정렬되었습니다.");
-            }
+            // 새 항목이 들어올 때마다 현재 정렬 옵션에 맞게 표 전체를 즉시 재정렬
+            applyCurrentSort();
         }
 
         function downloadExcel() {
