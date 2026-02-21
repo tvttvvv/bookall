@@ -65,7 +65,7 @@ def analyze_book(keyword):
         print(f"광고 API 에러: {e}")
         search_volume = 0
 
-    # 2. 화면 크롤링 (A/B 분류)
+    # 2. 화면 크롤링 (A/B 분류 로직 대폭 강화)
     link = f"https://search.naver.com/search.naver?where=nexearch&query={urllib.parse.quote(keyword)}"
     grade = ""
     reason = ""
@@ -80,7 +80,14 @@ def analyze_book(keyword):
         html_res = requests.get(link, headers=req_headers, timeout=5)
         soup = BeautifulSoup(html_res.text, "html.parser")
 
-        book_area = soup.find(class_=re.compile(r'cs_book|sp_book'))
+        # 네이버 도서 영역을 더 넓고 안전하게 찾기
+        book_area = None
+        inner_book = soup.find(class_=re.compile(r'cs_book|sp_book'))
+        
+        if inner_book:
+            # 안전하게 전체 박스(부모 요소)를 잡아 누락되는 텍스트가 없도록 함
+            parent_bx = inner_book.find_parent("div", class_="api_subject_bx")
+            book_area = parent_bx if parent_bx else inner_book
         
         if not book_area:
             for bx in soup.find_all("div", class_="api_subject_bx"):
@@ -91,22 +98,27 @@ def analyze_book(keyword):
 
         if book_area:
             book_text = book_area.get_text(separator=" ", strip=True)
-            match = re.search(r'(?:도서\s*)?판매처\s*([\d,]+)', book_text)
+            # 🔥 핵심 수정: '판매처' 외에 '판매자', '판매몰', '쇼핑몰' 이라는 단어를 모두 잡아내도록 강력하게 수정
+            match = re.search(r'(판매처|판매자|판매몰|쇼핑몰)\s*([\d,]+)', book_text)
             
             if match:
-                seller_count = int(match.group(1).replace(',', ''))
+                seller_word = match.group(1) # 표기된 단어 추출 (판매자, 판매처 등)
+                seller_count = int(match.group(2).replace(',', ''))
                 grade = "B (일반)"
-                reason = f"대표카드 묶임 (판매처 {seller_count}개)"
+                reason = f"대표카드 묶임 ({seller_word} {seller_count}개)"
             else:
                 grade = "A (황금 🏆)"
                 reason = "대표카드 아님 (단독 노출)"
         else:
             page_text = soup.get_text(separator=" ", strip=True)
-            match_fallback = re.search(r'도서\s*판매처\s*([\d,]+)', page_text)
+            # 최후의 보루: 화면 어딘가에 판매자/판매처 정보가 뜬다면 잡아냄
+            match_fallback = re.search(r'(?:도서)?\s*(판매처|판매자|판매몰|쇼핑몰)\s*([\d,]+)', page_text)
+            
             if match_fallback:
-                seller_count = int(match_fallback.group(1).replace(',', ''))
+                seller_word = match_fallback.group(1)
+                seller_count = int(match_fallback.group(2).replace(',', ''))
                 grade = "B (일반)"
-                reason = f"대표카드 묶임 (판매처 {seller_count}개)"
+                reason = f"대표카드 묶임 ({seller_word} {seller_count}개)"
             else:
                 grade = "B (일반)"
                 reason = "도서 검색결과 없음"
@@ -125,7 +137,7 @@ def analyze_book(keyword):
         "link": link
     }
 
-# --- 웹 페이지 템플릿 (정렬 옵션 추가) ---
+# --- 웹 페이지 템플릿 (기존과 동일) ---
 TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -193,7 +205,6 @@ TEMPLATE = """
     {% endif %}
 
     <script>
-        // 실시간 입력 건수 세기 로직
         const textarea = document.getElementById('keywordInput');
         const countDisplay = document.getElementById('countDisplay');
 
@@ -205,7 +216,6 @@ TEMPLATE = """
         textarea.addEventListener('input', updateCount);
         window.addEventListener('DOMContentLoaded', updateCount);
 
-        // 엑셀(CSV) 다운로드 로직
         function downloadExcel() {
             let csv = '\\uFEFF'; 
             let rows = document.querySelectorAll("#resultTable tr");
@@ -243,18 +253,17 @@ TEMPLATE = """
 def home():
     results = []
     keywords_text = ""
-    sort_option = "original" # 기본값은 원본 순서
+    sort_option = "original"
     
     if request.method == "POST":
         keywords_text = request.form.get("keywords", "")
-        sort_option = request.form.get("sort_option", "original") # 선택한 정렬 방식 가져오기
+        sort_option = request.form.get("sort_option", "original") 
         keywords = [k.strip() for k in keywords_text.split("\n") if k.strip()]
         
         for keyword in keywords:
             results.append(analyze_book(keyword))
             time.sleep(0.5) 
 
-        # 정렬 방식에 따라 리스트 순서 변경
         if sort_option == "grade":
             results.sort(key=lambda x: x['grade'])
 
@@ -262,7 +271,7 @@ def home():
         TEMPLATE, 
         results=results, 
         keywords=keywords_text,
-        sort_option=sort_option # 템플릿으로 정렬 옵션 넘겨주기 (선택 상태 유지용)
+        sort_option=sort_option 
     )
 
 if __name__ == "__main__":
