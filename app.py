@@ -11,10 +11,14 @@ import re
 
 app = Flask(__name__)
 
-# --- 광고 API 설정 ---
+# --- 광고 API 설정 (검색량 조회용) ---
 AD_ACCESS_KEY = os.environ.get("ACCESS_KEY", "")
 AD_SECRET_KEY = os.environ.get("SECRET_KEY", "")
 AD_CUSTOMER_ID = os.environ.get("CUSTOMER_ID", "")
+
+# --- 검색 API 설정 (ISBN 조회용) ---
+NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "")
+NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "")
 
 def get_ad_header(method, uri):
     timestamp = str(int(time.time() * 1000))
@@ -30,7 +34,8 @@ def get_ad_header(method, uri):
         "X-Signature": signature
     }
 
-def analyze_book(keyword):
+def analyze_book(keyword, fetch_isbn=False):
+    # 1. 총 검색량 조회
     search_volume = 0
     try:
         uri = '/keywordstool'
@@ -64,6 +69,7 @@ def analyze_book(keyword):
         print(f"광고 API 에러: {e}")
         search_volume = 0
 
+    # 2. 화면 크롤링 (등급 분류)
     pc_link = f"https://search.naver.com/search.naver?where=nexearch&query={urllib.parse.quote(keyword)}"
     grade = ""
     reason = ""
@@ -89,7 +95,6 @@ def analyze_book(keyword):
                 reason = "도서 검색결과 없음"
         else:
             main_text = main_pack.get_text(separator=" ", strip=True)
-            
             match = re.search(r'(판매처|판매자|판매몰|쇼핑몰)\s*([\d,]+)', main_text)
             
             if match:
@@ -99,13 +104,9 @@ def analyze_book(keyword):
                 reason = f"대표카드 묶임 ({seller_word} {seller_count}개)"
             else:
                 is_book_card_exist = False
-                
-                # 🔥 핵심 수정: 텍스트 유추를 끄고, 명확한 도서 컨테이너 구조가 있는지 깐깐하게 검사
-                # 1. 네이버 도서 고유 클래스(cs_book, sp_book)가 있는지 확인
                 if main_pack.find(class_=re.compile(r'cs_book|sp_book')):
                     is_book_card_exist = True
                 else:
-                    # 2. 각 섹션 타이틀 중에 명확하게 "도서" 또는 "책정보"가 있는지 확인
                     for bx in main_pack.find_all("div", class_="api_subject_bx"):
                         title_tag = bx.find(class_=re.compile(r'api_title|title'))
                         if title_tag:
@@ -126,12 +127,35 @@ def analyze_book(keyword):
         grade = "오류"
         reason = "일시적 스크래핑 실패"
 
+    # 3. ISBN 추출 (B등급이고, 스위치가 켜져 있을 때만 작동)
+    isbn = "-"
+    if grade == "B (일반)" and fetch_isbn:
+        try:
+            api_headers = {
+                "X-Naver-Client-Id": NAVER_CLIENT_ID,
+                "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
+            }
+            book_api_url = f"https://openapi.naver.com/v1/search/book.json?query={urllib.parse.quote(keyword)}&display=1"
+            book_res = requests.get(book_api_url, headers=api_headers, timeout=3)
+            
+            if book_res.status_code == 200:
+                items = book_res.json().get('items', [])
+                if items:
+                    isbn_raw = items[0].get('isbn', '')
+                    # 네이버는 '10자리 13자리' 띄어쓰기로 ISBN을 줌. 보통 13자리가 뒤에 있음.
+                    isbns = isbn_raw.split()
+                    isbn = isbns[-1] if isbns else "-"
+        except Exception as e:
+            print(f"ISBN API 에러: {e}")
+            isbn = "조회 실패"
+
     return {
         "keyword": keyword,
         "search_volume": search_volume,
         "seller_count": seller_count if seller_count > 0 else "-",
         "grade": grade,
         "reason": reason,
+        "isbn": isbn,
         "link": pc_link
     }
 
@@ -150,15 +174,25 @@ TEMPLATE = """
         .btn-excel { background-color: #28a745; color: white; border: none; border-radius: 5px; }
         .btn-submit { background-color: #007bff; color: white; border: none; border-radius: 5px; }
         select { padding: 9px; font-size: 15px; border-radius: 5px; margin-right: 10px; }
+        
+        /* 토글 스위치 디자인 */
+        .toggle-wrapper { display: flex; align-items: center; margin-right: 15px; cursor: pointer; font-weight: bold; font-size: 14px; }
+        .switch { position: relative; display: inline-block; width: 44px; height: 24px; margin-right: 8px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 24px; }
+        .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background-color: #007bff; }
+        input:checked + .slider:before { transform: translateX(20px); }
+
         .progress-container { margin-top: 15px; padding: 15px; background-color: #f8f9fa; border: 1px solid #ddd; border-radius: 5px; display: none; }
         .progress-text { font-weight: bold; margin-bottom: 8px; font-size: 16px; color: #333; }
         .progress-bar-bg { width: 100%; background-color: #e9ecef; border-radius: 5px; height: 20px; overflow: hidden; }
         .progress-bar-fill { width: 0%; height: 100%; background-color: #007bff; transition: width 0.4s ease; }
+        
         table { width: 100%; border-collapse: collapse; text-align: center; margin-top: 15px; }
         th, td { border: 1px solid #ddd; padding: 8px; }
         th { background-color: #f2f2f2; position: sticky; top: 0; }
         
-        /* 등급별 배경색 추가 */
         .grade-a { background-color: #e6f7ff; }
         .grade-c { background-color: #fcfcfc; color: #777; }
         
@@ -166,13 +200,21 @@ TEMPLATE = """
     </style>
 </head>
 <body>
-    <h1>📚 도서 키워드 통합 분석기 (A-C-B 정렬)</h1>
+    <h1>📚 도서 키워드 통합 분석기 (ISBN 추출 기능)</h1>
     
     <div class="input-area">
         <textarea id="keywordInput" rows="10" cols="70" placeholder="책 제목들을 한 줄에 하나씩 입력하세요"></textarea>
         <div class="stats">입력된 키워드: 총 <span id="countDisplay" style="color: blue;">0</span> 건</div>
         
         <div style="display: flex; align-items: center; margin-top: 10px;">
+            <label class="toggle-wrapper">
+                <div class="switch">
+                    <input type="checkbox" id="isbnToggle" checked>
+                    <span class="slider"></span>
+                </div>
+                B등급 ISBN 추출 (켜짐)
+            </label>
+
             <select id="sortOption">
                 <option value="original">입력 순서대로 표시 (원본)</option>
                 <option value="grade">A등급 우선 정렬 (A → C → B)</option>
@@ -202,6 +244,7 @@ TEMPLATE = """
                     <th>판매처 수</th>
                     <th>분류 등급</th>
                     <th>분류 이유 (참고용)</th>
+                    <th>ISBN (B등급)</th>
                     <th>링크</th>
                 </tr>
             </thead>
@@ -214,6 +257,12 @@ TEMPLATE = """
         const textarea = document.getElementById('keywordInput');
         const countDisplay = document.getElementById('countDisplay');
         const sortOptionSelect = document.getElementById('sortOption');
+        const isbnToggle = document.getElementById('isbnToggle');
+
+        // 스위치 글자 텍스트 변경 (켜짐/꺼짐)
+        isbnToggle.addEventListener('change', function() {
+            this.parentElement.nextSibling.textContent = this.checked ? " B등급 ISBN 추출 (켜짐)" : " B등급 ISBN 추출 (꺼짐)";
+        });
 
         function updateCount() {
             const lines = textarea.value.split('\\n').filter(line => line.trim() !== '');
@@ -225,7 +274,6 @@ TEMPLATE = """
             applyCurrentSort();
         });
 
-        // 🔥 A -> C -> B 순서로 정렬하는 핵심 로직
         function applyCurrentSort() {
             const tbody = document.getElementById('resultBody');
             const rows = Array.from(tbody.querySelectorAll('tr'));
@@ -236,7 +284,6 @@ TEMPLATE = """
                     const textA = a.querySelector('td:nth-child(4) span').innerText;
                     const textB = b.querySelector('td:nth-child(4) span').innerText;
                     
-                    // A는 1점, C는 2점, B는 3점, 오류는 4점
                     let scoreA = 4;
                     if (textA.includes('A')) scoreA = 1;
                     else if (textA.includes('C')) scoreA = 2;
@@ -274,6 +321,7 @@ TEMPLATE = """
             const keywordsText = textarea.value;
             const keywords = keywordsText.split('\\n').map(k => k.trim()).filter(k => k !== '');
             const total = keywords.length;
+            const fetchIsbn = isbnToggle.checked; // 현재 토글 상태 가져오기
 
             if (total === 0) {
                 alert('키워드를 입력해주세요!');
@@ -299,13 +347,14 @@ TEMPLATE = """
                     const response = await fetch('/api/analyze', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ keyword: kw })
+                        // 백엔드로 키워드와 함께 ISBN 추출 여부 전달
+                        body: JSON.stringify({ keyword: kw, fetch_isbn: fetchIsbn })
                     });
                     rowData = await response.json();
                 } catch (error) {
                     rowData = {
                         keyword: kw, search_volume: 0, seller_count: "-",
-                        grade: "오류", reason: "네트워크 통신 실패", link: "#"
+                        grade: "오류", reason: "네트워크 통신 실패", isbn: "-", link: "#"
                     };
                 }
 
@@ -339,7 +388,7 @@ TEMPLATE = """
             
             let gradeColor = 'black';
             if (isGradeA) gradeColor = 'blue';
-            else if (isGradeC) gradeColor = '#f0ad4e'; // C등급은 약간의 주황/황토색으로 포인트
+            else if (isGradeC) gradeColor = '#f0ad4e'; 
             else if (r.grade.includes('오류')) gradeColor = 'red';
 
             tr.innerHTML = `
@@ -348,6 +397,7 @@ TEMPLATE = """
                 <td><b style="color:#d9534f;">${r.seller_count}</b></td>
                 <td><span style="color: ${gradeColor}; font-weight:bold;">${r.grade}</span></td>
                 <td style="color: gray; font-size: 0.9em;">${r.reason}</td>
+                <td style="font-family: monospace; color: #555;">${r.isbn || '-'}</td>
                 <td><a href="${r.link}" target="_blank">확인하기</a></td>
             `;
             tbody.appendChild(tr);
@@ -367,6 +417,10 @@ TEMPLATE = """
                         data = cols[j].querySelector("a").href;
                     } else {
                         data = cols[j].innerText.replace(/"/g, '""'); 
+                        // 엑셀에서 ISBN 같은 긴 숫자가 지수형태(1.2E+12)로 깨지는 것을 방지
+                        if (j === 5 && data !== "-" && data !== "ISBN (B등급)") {
+                            data = '="' + data + '"';
+                        }
                     }
                     row.push('"' + data + '"');
                 }
@@ -395,7 +449,9 @@ def home():
 def api_analyze():
     data = request.get_json()
     keyword = data.get("keyword", "")
-    result = analyze_book(keyword)
+    fetch_isbn = data.get("fetch_isbn", False) # 프론트에서 넘어온 스위치 상태
+    
+    result = analyze_book(keyword, fetch_isbn=fetch_isbn)
     return jsonify(result)
 
 if __name__ == "__main__":
