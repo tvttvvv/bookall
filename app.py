@@ -31,11 +31,10 @@ def get_ad_header(method, uri):
     }
 
 def analyze_book(keyword):
-    # 1. 총 검색량 조회 (광고 API 정확도 개선)
+    # 1. 총 검색량 조회
     search_volume = 0
     try:
         uri = '/keywordstool'
-        # 띄어쓰기 문제 해결을 위해 공백 제거
         clean_keyword = keyword.replace(" ", "")
         params = {'hintKeywords': clean_keyword, 'showDetail': '1'}
         headers = get_ad_header('GET', uri)
@@ -44,20 +43,17 @@ def analyze_book(keyword):
         if res.status_code == 200:
             data_list = res.json().get('keywordList', [])
             found = False
-            # API가 반환한 목록 중 가장 유사한 키워드의 검색량 추출
             for item in data_list:
                 api_kw = item.get('relKeyword', '').replace(" ", "")
                 if api_kw.lower() == clean_keyword.lower():
                     pc = item.get('monthlyPcQcCnt', 0)
                     mo = item.get('monthlyMobileQcCnt', 0)
-                    # '< 10' 문자열 처리
                     if isinstance(pc, str): pc = 10
                     if isinstance(mo, str): mo = 10
                     search_volume = pc + mo
                     found = True
                     break
             
-            # 정확히 일치하지 않아도 검색결과가 있다면 첫 번째 데이터 사용
             if not found and len(data_list) > 0:
                 item = data_list[0]
                 pc = item.get('monthlyPcQcCnt', 0)
@@ -69,14 +65,13 @@ def analyze_book(keyword):
         print(f"광고 API 에러: {e}")
         search_volume = 0
 
-    # 2. 화면 크롤링 (네이버 차단 우회 및 구조 파악 개선)
+    # 2. 화면 크롤링 (A/B 분류)
     link = f"https://search.naver.com/search.naver?where=nexearch&query={urllib.parse.quote(keyword)}"
     grade = ""
     reason = ""
     seller_count = 0
 
     try:
-        # 네이버가 봇을 차단하지 않도록 진짜 브라우저처럼 위장
         req_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept-Language": "ko-KR,ko;q=0.9",
@@ -85,13 +80,8 @@ def analyze_book(keyword):
         html_res = requests.get(link, headers=req_headers, timeout=5)
         soup = BeautifulSoup(html_res.text, "html.parser")
 
-        # 네이버 도서 영역을 광범위하게 찾기
-        book_area = None
-        
-        # 방식 A: 클래스명으로 찾기 (최신 네이버 구조 반영)
         book_area = soup.find(class_=re.compile(r'cs_book|sp_book'))
         
-        # 방식 B: 클래스가 바뀌었을 경우를 대비해 '도서' 타이틀을 가진 섹션 직접 찾기
         if not book_area:
             for bx in soup.find_all("div", class_="api_subject_bx"):
                 title_tag = bx.find(class_=re.compile(r'api_title|title'))
@@ -100,7 +90,6 @@ def analyze_book(keyword):
                     break
 
         if book_area:
-            # 도서 영역 텍스트 전체에서 '판매처 [숫자]' 추출
             book_text = book_area.get_text(separator=" ", strip=True)
             match = re.search(r'(?:도서\s*)?판매처\s*([\d,]+)', book_text)
             
@@ -112,7 +101,6 @@ def analyze_book(keyword):
                 grade = "A (황금 🏆)"
                 reason = "대표카드 아님 (단독 노출)"
         else:
-            # 도서 영역을 못 찾았지만 혹시 화면 어딘가에 책 판매처가 뜬다면 (최후의 보루)
             page_text = soup.get_text(separator=" ", strip=True)
             match_fallback = re.search(r'도서\s*판매처\s*([\d,]+)', page_text)
             if match_fallback:
@@ -137,22 +125,45 @@ def analyze_book(keyword):
         "link": link
     }
 
-# --- 웹 페이지 템플릿 (UI 약간 다듬음) ---
+# --- 웹 페이지 템플릿 (UI 및 자바스크립트 추가) ---
 TEMPLATE = """
 <!DOCTYPE html>
 <html>
-<head><title>Book 분석기 Pro</title></head>
+<head>
+    <title>Book 분석기 Pro</title>
+    <style>
+        body { font-family: 'Malgun Gothic', sans-serif; padding: 20px; }
+        .input-area { margin-bottom: 20px; }
+        .stats { font-weight: bold; color: #333; margin-bottom: 10px; }
+        .btn { padding: 10px 20px; font-weight: bold; cursor: pointer; margin-right: 10px; }
+        .btn-excel { background-color: #28a745; color: white; border: none; border-radius: 5px; }
+        .btn-submit { background-color: #007bff; color: white; border: none; border-radius: 5px; }
+        table { width: 100%; border-collapse: collapse; text-align: center; margin-top: 15px; }
+        th, td { border: 1px solid #ddd; padding: 8px; }
+        th { background-color: #f2f2f2; }
+        .grade-a { background-color: #e6f7ff; }
+    </style>
+</head>
 <body>
     <h1>📚 도서 키워드 통합 분석기</h1>
-    <form method="POST">
-        <textarea name="keywords" rows="10" cols="70" placeholder="책 제목들을 한 줄에 하나씩 입력하세요">{{keywords}}</textarea><br><br>
-        <button type="submit" style="padding:10px 20px; font-weight:bold; cursor:pointer;">일괄 분석 시작</button>
-    </form>
+    
+    <div class="input-area">
+        <form method="POST">
+            <textarea id="keywordInput" name="keywords" rows="10" cols="70" placeholder="책 제목들을 한 줄에 하나씩 입력하세요">{{keywords}}</textarea>
+            <div class="stats">입력된 키워드: 총 <span id="countDisplay" style="color: blue;">0</span> 건</div>
+            <button type="submit" class="btn btn-submit">일괄 분석 시작</button>
+        </form>
+    </div>
 
     {% if results %}
     <hr>
-    <table border="1" style="width:100%; border-collapse: collapse; text-align:center;">
-        <tr style="background-color: #f2f2f2;">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h3>분류 결과 (A등급 우선 정렬됨)</h3>
+        <button onclick="downloadExcel()" class="btn btn-excel">📥 엑셀로 다운로드</button>
+    </div>
+    
+    <table id="resultTable">
+        <tr>
             <th>키워드</th>
             <th>월간 총 검색량</th>
             <th>판매처 수</th>
@@ -161,8 +172,8 @@ TEMPLATE = """
             <th>링크</th>
         </tr>
         {% for r in results %}
-        <tr style="background-color: {{ '#e6f7ff' if 'A' in r.grade else 'white' }};">
-            <td style="padding: 5px;">{{r.keyword}}</td>
+        <tr class="{{ 'grade-a' if 'A' in r.grade else '' }}">
+            <td>{{r.keyword}}</td>
             <td>{{ "{:,}".format(r.search_volume) if r.search_volume > 0 else 0 }}</td>
             <td><b style="color:#d9534f;">{{ r.seller_count }}</b></td>
             <td><span style="color: {{ 'blue' if 'A' in r.grade else 'black' }}; font-weight:bold;">{{r.grade}}</span></td>
@@ -172,6 +183,55 @@ TEMPLATE = """
         {% endfor %}
     </table>
     {% endif %}
+
+    <script>
+        // 1. 실시간 입력 건수 세기 로직
+        const textarea = document.getElementById('keywordInput');
+        const countDisplay = document.getElementById('countDisplay');
+
+        function updateCount() {
+            // 빈 줄을 제외하고 실제 글자가 있는 줄만 카운트
+            const lines = textarea.value.split('\\n').filter(line => line.trim() !== '');
+            countDisplay.textContent = lines.length;
+        }
+
+        // 입력할 때마다 숫자 업데이트
+        textarea.addEventListener('input', updateCount);
+        // 페이지 로딩 시 초기 숫자 세팅
+        window.addEventListener('DOMContentLoaded', updateCount);
+
+        // 2. 엑셀(CSV) 다운로드 로직
+        function downloadExcel() {
+            let csv = '\\uFEFF'; // 한글 깨짐 방지용 BOM
+            let rows = document.querySelectorAll("#resultTable tr");
+            
+            for (let i = 0; i < rows.length; i++) {
+                let row = [], cols = rows[i].querySelectorAll("td, th");
+                
+                for (let j = 0; j < cols.length; j++) {
+                    let data = "";
+                    // 링크 칼럼(<a>태그)일 경우 '확인하기' 대신 실제 URL 주소를 추출
+                    if (cols[j].querySelector("a")) {
+                        data = cols[j].querySelector("a").href;
+                    } else {
+                        data = cols[j].innerText.replace(/"/g, '""'); // 따옴표 처리
+                    }
+                    row.push('"' + data + '"');
+                }
+                csv += row.join(",") + "\\n";
+            }
+            
+            // CSV 파일 생성 및 다운로드 실행
+            let blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            let link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = "도서_분석결과.csv";
+            link.style.display = "none";
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+    </script>
 </body>
 </html>
 """
@@ -186,7 +246,10 @@ def home():
         
         for keyword in keywords:
             results.append(analyze_book(keyword))
-            time.sleep(0.5) # 서버 차단 방지용 딜레이 (조금 늘림)
+            time.sleep(0.5) 
+
+        # 3. A등급 우선 정렬 로직 (알파벳 순 정렬: 'A'가 'B'보다 무조건 앞섬)
+        results.sort(key=lambda x: x['grade'])
 
     return render_template_string(TEMPLATE, results=results, keywords=keywords_text)
 
