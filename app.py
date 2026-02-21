@@ -85,7 +85,7 @@ def analyze_book(keyword):
                 grade = "오류"
                 reason = "네이버 봇 차단 (일시적 접근 제한)"
             else:
-                grade = "B (일반)"
+                grade = "C (검색불가)"
                 reason = "검색결과 없음"
         else:
             main_text = main_pack.get_text(separator=" ", strip=True)
@@ -113,7 +113,7 @@ def analyze_book(keyword):
                     grade = "A (황금 🏆)"
                     reason = "대표카드 아님 (단독 노출)"
                 else:
-                    grade = "B (일반)"
+                    grade = "C (검색불가)"
                     reason = "도서 검색결과 없음"
 
     except Exception as e:
@@ -152,12 +152,16 @@ TEMPLATE = """
         table { width: 100%; border-collapse: collapse; text-align: center; margin-top: 15px; }
         th, td { border: 1px solid #ddd; padding: 8px; }
         th { background-color: #f2f2f2; position: sticky; top: 0; }
+        
+        /* 등급별 배경색 추가 */
         .grade-a { background-color: #e6f7ff; }
+        .grade-c { background-color: #fcfcfc; color: #777; }
+        
         .table-container { max-height: 600px; overflow-y: auto; margin-top: 10px; border-bottom: 1px solid #ddd; display: none; }
     </style>
 </head>
 <body>
-    <h1>📚 도서 키워드 통합 분석기 (실시간 강력 정렬)</h1>
+    <h1>📚 도서 키워드 통합 분석기 (A-C-B 정렬)</h1>
     
     <div class="input-area">
         <textarea id="keywordInput" rows="10" cols="70" placeholder="책 제목들을 한 줄에 하나씩 입력하세요"></textarea>
@@ -166,7 +170,7 @@ TEMPLATE = """
         <div style="display: flex; align-items: center; margin-top: 10px;">
             <select id="sortOption">
                 <option value="original">입력 순서대로 표시 (원본)</option>
-                <option value="grade">A등급 우선 정렬 (실시간)</option>
+                <option value="grade">A등급 우선 정렬 (A → C → B)</option>
             </select>
             <button id="submitBtn" class="btn btn-submit" onclick="startAnalysis()">일괄 분석 시작</button>
         </div>
@@ -212,51 +216,49 @@ TEMPLATE = """
         }
         textarea.addEventListener('input', updateCount);
 
-        // 정렬 옵션이 변경될 때 즉시 재배치
         sortOptionSelect.addEventListener('change', function() {
             applyCurrentSort();
         });
 
-        // 현재 정렬 옵션에 맞게 표를 강력하게 재배치하는 함수
+        // 🔥 A -> C -> B 순서로 정렬하는 핵심 로직
         function applyCurrentSort() {
             const tbody = document.getElementById('resultBody');
             const rows = Array.from(tbody.querySelectorAll('tr'));
             const sortOption = document.getElementById('sortOption').value;
 
             if (sortOption === 'grade') {
-                // A등급 우선 정렬 모드
                 rows.sort((a, b) => {
                     const textA = a.querySelector('td:nth-child(4) span').innerText;
                     const textB = b.querySelector('td:nth-child(4) span').innerText;
                     
-                    // A는 1점, B는 2점, 오류는 3점 부여
-                    const scoreA = textA.includes('A') ? 1 : (textA.includes('B') ? 2 : 3);
-                    const scoreB = textB.includes('A') ? 1 : (textB.includes('B') ? 2 : 3);
+                    // A는 1점, C는 2점, B는 3점, 오류는 4점
+                    let scoreA = 4;
+                    if (textA.includes('A')) scoreA = 1;
+                    else if (textA.includes('C')) scoreA = 2;
+                    else if (textA.includes('B')) scoreA = 3;
+
+                    let scoreB = 4;
+                    if (textB.includes('A')) scoreB = 1;
+                    else if (textB.includes('C')) scoreB = 2;
+                    else if (textB.includes('B')) scoreB = 3;
                     
-                    // 점수가 같다면 (둘 다 A거나 둘 다 B면) 원래 들어온 순서대로 정렬
                     if (scoreA === scoreB) {
                         return parseInt(a.getAttribute('data-index')) - parseInt(b.getAttribute('data-index'));
                     }
                     return scoreA - scoreB;
                 });
                 
-                // 표 업데이트
                 tbody.innerHTML = '';
                 rows.forEach(row => tbody.appendChild(row));
-                
-                // 스크롤 맨 위로 올려서 A가 보이게 함
                 document.getElementById('tableContainer').scrollTop = 0;
             } else {
-                // 원본 순서 모드
                 rows.sort((a, b) => {
                     return parseInt(a.getAttribute('data-index')) - parseInt(b.getAttribute('data-index'));
                 });
                 
-                // 표 업데이트
                 tbody.innerHTML = '';
                 rows.forEach(row => tbody.appendChild(row));
                 
-                // 가장 최근에 검사한 책이 보이도록 스크롤을 맨 아래로 내림
                 const container = document.getElementById('tableContainer');
                 container.scrollTop = container.scrollHeight;
             }
@@ -302,14 +304,12 @@ TEMPLATE = """
                     };
                 }
 
-                // 분석된 결과에 고유 순서(index) 부여 후 표에 추가
                 rowData.original_index = i;
                 appendRow(rowData);
 
                 const percent = Math.round(((i + 1) / total) * 100);
                 document.getElementById('progressBar').style.width = percent + '%';
                 
-                // 서버 과부하 방지 딜레이
                 await new Promise(r => setTimeout(r, 600));
             }
 
@@ -322,16 +322,19 @@ TEMPLATE = """
             const tbody = document.getElementById('resultBody');
             const tr = document.createElement('tr');
             
-            // 향후 정렬을 위해 고유 번호를 숨겨둠
             tr.setAttribute('data-index', r.original_index);
             
             const isGradeA = r.grade.includes('A');
+            const isGradeC = r.grade.includes('C');
+            
             if (isGradeA) tr.className = 'grade-a';
+            else if (isGradeC) tr.className = 'grade-c';
 
             const svFormat = r.search_volume > 0 ? r.search_volume.toLocaleString() : '0';
             
             let gradeColor = 'black';
             if (isGradeA) gradeColor = 'blue';
+            else if (isGradeC) gradeColor = '#f0ad4e'; // C등급은 약간의 주황/황토색으로 포인트
             else if (r.grade.includes('오류')) gradeColor = 'red';
 
             tr.innerHTML = `
@@ -344,7 +347,6 @@ TEMPLATE = """
             `;
             tbody.appendChild(tr);
             
-            // 새 항목이 들어올 때마다 현재 정렬 옵션에 맞게 표 전체를 즉시 재정렬
             applyCurrentSort();
         }
 
