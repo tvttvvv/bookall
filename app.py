@@ -11,7 +11,7 @@ import re
 
 app = Flask(__name__)
 
-# --- 광고 API 설정 (검색량 조회용) ---
+# --- 광고 API 설정 ---
 AD_ACCESS_KEY = os.environ.get("ACCESS_KEY", "")
 AD_SECRET_KEY = os.environ.get("SECRET_KEY", "")
 AD_CUSTOMER_ID = os.environ.get("CUSTOMER_ID", "")
@@ -35,7 +35,6 @@ def get_ad_header(method, uri):
     }
 
 def analyze_book(keyword, fetch_isbn=False):
-    # 1. 총 검색량 조회
     search_volume = 0
     try:
         uri = '/keywordstool'
@@ -69,7 +68,6 @@ def analyze_book(keyword, fetch_isbn=False):
         print(f"광고 API 에러: {e}")
         search_volume = 0
 
-    # 2. 화면 크롤링 (등급 분류)
     pc_link = f"https://search.naver.com/search.naver?where=nexearch&query={urllib.parse.quote(keyword)}"
     grade = ""
     reason = ""
@@ -127,7 +125,7 @@ def analyze_book(keyword, fetch_isbn=False):
         grade = "오류"
         reason = "일시적 스크래핑 실패"
 
-    # 3. ISBN 추출 (B등급이고, 스위치가 켜져 있을 때만 작동)
+    # 🔥 수정된 ISBN 추출 로직
     isbn = "-"
     if grade == "B (일반)" and fetch_isbn:
         try:
@@ -135,16 +133,27 @@ def analyze_book(keyword, fetch_isbn=False):
                 "X-Naver-Client-Id": NAVER_CLIENT_ID,
                 "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
             }
-            book_api_url = f"https://openapi.naver.com/v1/search/book.json?query={urllib.parse.quote(keyword)}&display=1"
+            # 판매량순(sort=count)으로 10개를 가져와서 가장 대중적인 대표 종이책을 타겟팅
+            book_api_url = f"https://openapi.naver.com/v1/search/book.json?query={urllib.parse.quote(keyword)}&display=10&sort=count"
             book_res = requests.get(book_api_url, headers=api_headers, timeout=3)
             
             if book_res.status_code == 200:
                 items = book_res.json().get('items', [])
-                if items:
-                    isbn_raw = items[0].get('isbn', '')
-                    # 네이버는 '10자리 13자리' 띄어쓰기로 ISBN을 줌. 보통 13자리가 뒤에 있음.
+                for item in items:
+                    isbn_raw = item.get('isbn', '')
                     isbns = isbn_raw.split()
-                    isbn = isbns[-1] if isbns else "-"
+                    
+                    found_valid = False
+                    for candidate in reversed(isbns):
+                        # 오디오북, e북(6 등)을 거르고 진짜 종이책(8, 9)만 추출
+                        if candidate.startswith('8') or candidate.startswith('9'):
+                            isbn = candidate
+                            found_valid = True
+                            break
+                    
+                    # 유효한 ISBN을 찾았다면 더 이상 찾지 않고 종료 (가장 많이 묶인 대표책)
+                    if found_valid:
+                        break
         except Exception as e:
             print(f"ISBN API 에러: {e}")
             isbn = "조회 실패"
@@ -159,7 +168,7 @@ def analyze_book(keyword, fetch_isbn=False):
         "link": pc_link
     }
 
-# --- 웹 페이지 템플릿 ---
+# --- 웹 페이지 템플릿 (UI 동일) ---
 TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -175,7 +184,6 @@ TEMPLATE = """
         .btn-submit { background-color: #007bff; color: white; border: none; border-radius: 5px; }
         select { padding: 9px; font-size: 15px; border-radius: 5px; margin-right: 10px; }
         
-        /* 토글 스위치 디자인 */
         .toggle-wrapper { display: flex; align-items: center; margin-right: 15px; cursor: pointer; font-weight: bold; font-size: 14px; }
         .switch { position: relative; display: inline-block; width: 44px; height: 24px; margin-right: 8px; }
         .switch input { opacity: 0; width: 0; height: 0; }
@@ -200,7 +208,7 @@ TEMPLATE = """
     </style>
 </head>
 <body>
-    <h1>📚 도서 키워드 통합 분석기 (ISBN 추출 기능)</h1>
+    <h1>📚 도서 키워드 통합 분석기 (ISBN 최적화)</h1>
     
     <div class="input-area">
         <textarea id="keywordInput" rows="10" cols="70" placeholder="책 제목들을 한 줄에 하나씩 입력하세요"></textarea>
@@ -259,7 +267,6 @@ TEMPLATE = """
         const sortOptionSelect = document.getElementById('sortOption');
         const isbnToggle = document.getElementById('isbnToggle');
 
-        // 스위치 글자 텍스트 변경 (켜짐/꺼짐)
         isbnToggle.addEventListener('change', function() {
             this.parentElement.nextSibling.textContent = this.checked ? " B등급 ISBN 추출 (켜짐)" : " B등급 ISBN 추출 (꺼짐)";
         });
@@ -321,7 +328,7 @@ TEMPLATE = """
             const keywordsText = textarea.value;
             const keywords = keywordsText.split('\\n').map(k => k.trim()).filter(k => k !== '');
             const total = keywords.length;
-            const fetchIsbn = isbnToggle.checked; // 현재 토글 상태 가져오기
+            const fetchIsbn = isbnToggle.checked; 
 
             if (total === 0) {
                 alert('키워드를 입력해주세요!');
@@ -347,7 +354,6 @@ TEMPLATE = """
                     const response = await fetch('/api/analyze', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        // 백엔드로 키워드와 함께 ISBN 추출 여부 전달
                         body: JSON.stringify({ keyword: kw, fetch_isbn: fetchIsbn })
                     });
                     rowData = await response.json();
@@ -417,7 +423,6 @@ TEMPLATE = """
                         data = cols[j].querySelector("a").href;
                     } else {
                         data = cols[j].innerText.replace(/"/g, '""'); 
-                        // 엑셀에서 ISBN 같은 긴 숫자가 지수형태(1.2E+12)로 깨지는 것을 방지
                         if (j === 5 && data !== "-" && data !== "ISBN (B등급)") {
                             data = '="' + data + '"';
                         }
@@ -449,7 +454,7 @@ def home():
 def api_analyze():
     data = request.get_json()
     keyword = data.get("keyword", "")
-    fetch_isbn = data.get("fetch_isbn", False) # 프론트에서 넘어온 스위치 상태
+    fetch_isbn = data.get("fetch_isbn", False)
     
     result = analyze_book(keyword, fetch_isbn=fetch_isbn)
     return jsonify(result)
