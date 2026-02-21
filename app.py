@@ -65,63 +65,62 @@ def analyze_book(keyword):
         print(f"광고 API 에러: {e}")
         search_volume = 0
 
-    # 2. 화면 크롤링 (A/B 분류 로직 대폭 강화)
-    link = f"https://search.naver.com/search.naver?where=nexearch&query={urllib.parse.quote(keyword)}"
+    # 2. 화면 크롤링 (Railway 봇 차단 우회를 위해 '모바일' 환경으로 위장 접속)
+    pc_link = f"https://search.naver.com/search.naver?where=nexearch&query={urllib.parse.quote(keyword)}"
+    scrape_url = f"https://m.search.naver.com/search.naver?where=m&query={urllib.parse.quote(keyword)}"
     grade = ""
     reason = ""
     seller_count = 0
 
     try:
+        # 최신 안드로이드 스마트폰 크롬 브라우저로 완벽 위장
         req_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-S918N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language": "ko-KR,ko;q=0.9",
-            "Referer": "https://www.naver.com/"
+            "Referer": "https://m.naver.com/"
         }
-        html_res = requests.get(link, headers=req_headers, timeout=5)
+        html_res = requests.get(scrape_url, headers=req_headers, timeout=5)
         soup = BeautifulSoup(html_res.text, "html.parser")
+        page_text = soup.get_text(separator=" ", strip=True)
 
-        # 네이버 도서 영역을 더 넓고 안전하게 찾기
-        book_area = None
-        inner_book = soup.find(class_=re.compile(r'cs_book|sp_book'))
-        
-        if inner_book:
-            # 안전하게 전체 박스(부모 요소)를 잡아 누락되는 텍스트가 없도록 함
-            parent_bx = inner_book.find_parent("div", class_="api_subject_bx")
-            book_area = parent_bx if parent_bx else inner_book
-        
-        if not book_area:
-            for bx in soup.find_all("div", class_="api_subject_bx"):
-                title_tag = bx.find(class_=re.compile(r'api_title|title'))
-                if title_tag and ('도서' in title_tag.get_text() or '책정보' in title_tag.get_text()):
-                    book_area = bx
-                    break
+        # 네이버가 봇을 감지하고 차단 화면을 띄웠는지 확인
+        if "비정상적인 인터넷 환경" in page_text or "자동 입력 방지" in page_text or "캡차" in page_text:
+            grade = "오류"
+            reason = "서버 IP 네이버 차단됨 (모바일 우회 실패)"
+        else:
+            # 모바일 도서 영역 찾기
+            book_area = soup.find(class_=re.compile(r'cs_book|sp_book|book_info|api_subject_bx'))
+            
+            if not book_area:
+                for bx in soup.find_all("section", class_="sc_new"):
+                    title_tag = bx.find(class_=re.compile(r'api_title|title'))
+                    if title_tag and ('도서' in title_tag.get_text() or '책' in title_tag.get_text()):
+                        book_area = bx
+                        break
 
-        if book_area:
-            book_text = book_area.get_text(separator=" ", strip=True)
-            # 🔥 핵심 수정: '판매처' 외에 '판매자', '판매몰', '쇼핑몰' 이라는 단어를 모두 잡아내도록 강력하게 수정
-            match = re.search(r'(판매처|판매자|판매몰|쇼핑몰)\s*([\d,]+)', book_text)
+            target_text = book_area.get_text(separator=" ", strip=True) if book_area else page_text
+            
+            match = re.search(r'(판매처|판매자|판매몰|쇼핑몰)\s*([\d,]+)', target_text)
             
             if match:
-                seller_word = match.group(1) # 표기된 단어 추출 (판매자, 판매처 등)
+                seller_word = match.group(1)
                 seller_count = int(match.group(2).replace(',', ''))
                 grade = "B (일반)"
                 reason = f"대표카드 묶임 ({seller_word} {seller_count}개)"
             else:
-                grade = "A (황금 🏆)"
-                reason = "대표카드 아님 (단독 노출)"
-        else:
-            page_text = soup.get_text(separator=" ", strip=True)
-            # 최후의 보루: 화면 어딘가에 판매자/판매처 정보가 뜬다면 잡아냄
-            match_fallback = re.search(r'(?:도서)?\s*(판매처|판매자|판매몰|쇼핑몰)\s*([\d,]+)', page_text)
-            
-            if match_fallback:
-                seller_word = match_fallback.group(1)
-                seller_count = int(match_fallback.group(2).replace(',', ''))
-                grade = "B (일반)"
-                reason = f"대표카드 묶임 ({seller_word} {seller_count}개)"
-            else:
-                grade = "B (일반)"
-                reason = "도서 검색결과 없음"
+                # 책 관련 필수 단어가 있는지 한 번 더 교차 검증 (뉴스 기사 등 오탐 방지)
+                is_real_book = ("저자" in target_text or "출판" in target_text or "발행" in target_text)
+                
+                if book_area and is_real_book:
+                    grade = "A (황금 🏆)"
+                    reason = "대표카드 아님 (단독 노출)"
+                elif "저자" in page_text and ("출판" in page_text or "발행" in page_text) and "도서" in page_text:
+                    grade = "A (황금 🏆)"
+                    reason = "대표카드 아님 (전체 텍스트 우회)"
+                else:
+                    grade = "B (일반)"
+                    reason = "도서 검색결과 없음"
 
     except Exception as e:
         print(f"크롤링 에러: {e}")
@@ -134,10 +133,10 @@ def analyze_book(keyword):
         "seller_count": seller_count if seller_count > 0 else "-",
         "grade": grade,
         "reason": reason,
-        "link": link
+        "link": pc_link # 엑셀 다운로드나 클릭 시에는 보기 편한 PC 화면으로 이동
     }
 
-# --- 웹 페이지 템플릿 (기존과 동일) ---
+# --- 웹 페이지 템플릿 ---
 TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -196,7 +195,7 @@ TEMPLATE = """
             <td>{{r.keyword}}</td>
             <td>{{ "{:,}".format(r.search_volume) if r.search_volume > 0 else 0 }}</td>
             <td><b style="color:#d9534f;">{{ r.seller_count }}</b></td>
-            <td><span style="color: {{ 'blue' if 'A' in r.grade else 'black' }}; font-weight:bold;">{{r.grade}}</span></td>
+            <td><span style="color: {{ 'blue' if 'A' in r.grade else 'red' if r.grade == '오류' else 'black' }}; font-weight:bold;">{{r.grade}}</span></td>
             <td style="color: gray; font-size: 0.9em;">{{r.reason}}</td>
             <td><a href="{{r.link}}" target="_blank">확인하기</a></td>
         </tr>
@@ -262,7 +261,7 @@ def home():
         
         for keyword in keywords:
             results.append(analyze_book(keyword))
-            time.sleep(0.5) 
+            time.sleep(0.6) # 모바일 봇 탐지 회피를 위해 0.1초 미세 조정
 
         if sort_option == "grade":
             results.sort(key=lambda x: x['grade'])
