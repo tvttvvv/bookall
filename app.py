@@ -1,134 +1,138 @@
-import os
+from flask import Flask, request, render_template_string
+import requests
 import time
-import random
 import hmac
 import hashlib
 import base64
-import requests
 import urllib.parse
-from flask import Flask, request, render_template_string, Response, stream_with_context
+import os # 환경 변수를 불러오기 위해 추가
 
 app = Flask(__name__)
 
-# Railway 환경변수 설정 확인
-ACCESS_KEY = os.environ.get("ACCESS_KEY")
-SECRET_KEY = os.environ.get("SECRET_KEY")
-CUSTOMER_ID = os.environ.get("CUSTOMER_ID")
+# --- API 설정 (Railway 환경 변수에서 불러오기) ---
+NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "")
+NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "")
 
-# 광고 API 인증 헤더 생성 함수
-def get_header(method, uri, api_key, secret_key, customer_id):
+AD_ACCESS_KEY = os.environ.get("ACCESS_KEY", "")
+AD_SECRET_KEY = os.environ.get("SECRET_KEY", "")
+AD_CUSTOMER_ID = os.environ.get("CUSTOMER_ID", "")
+
+# --- 광고 API 인증 헤더 생성 함수 ---
+def get_ad_header(method, uri):
     timestamp = str(int(time.time() * 1000))
-    signature = hmac.new(
-        secret_key.encode(),
-        f"{timestamp}.{method}.{uri}".encode(),
-        hashlib.sha256
-    ).digest()
+    message = f"{timestamp}.{method}.{uri}"
+    hash = hmac.new(AD_SECRET_KEY.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).digest()
+    signature = base64.b64encode(hash).decode()
     
     return {
         "Content-Type": "application/json; charset=UTF-8",
         "X-Timestamp": timestamp,
-        "X-API-KEY": api_key,
-        "X-Customer": str(customer_id),
-        "X-Signature": base64.b64encode(signature).decode()
+        "X-API-KEY": AD_ACCESS_KEY,
+        "X-Customer": str(AD_CUSTOMER_ID),
+        "X-Signature": signature
     }
 
-def get_real_search_volume(keyword):
-    """네이버 검색광고 API를 사용하여 실제 월간 검색량을 가져옵니다."""
-    uri = '/keywordstool'
-    method = 'GET'
-    params = {'hintKeywords': keyword, 'showDetail': '1'}
-    
+# --- 데이터 분석 로직 ---
+def analyze_book(keyword):
+    # 1. 검색량 조회 (광고 API)
+    search_volume = 0
     try:
-        headers = get_header(method, uri, ACCESS_KEY, SECRET_KEY, CUSTOMER_ID)
-        full_url = f"https://api.naver.com{uri}?hintKeywords={urllib.parse.quote(keyword)}&showDetail=1"
-        
-        res = requests.get(full_url, headers=headers)
+        uri = '/keywordstool'
+        params = {'hintKeywords': keyword, 'showDetail': '1'}
+        headers = get_ad_header('GET', uri)
+        res = requests.get(f"https://api.naver.com{uri}", params=params, headers=headers)
+        if res.status_code == 200:
+            data = res.json()['keywordList'][0]
+            # PC + 모바일 검색량 합산
+            search_volume = (data['monthlyPcQcCnt'] or 0) + (data['monthlyMobileQcCnt'] or 0)
+            # 10 미만은 '10'으로 표기되는 특성 처리
+            if isinstance(search_volume, str): search_volume = 10
+    except Exception as e:
+        print(f"광고 API 에러: {e}")
+        search_volume = 0
+
+    # 2. 상품수 및 링크 조회 (검색 API - 쇼핑)
+    seller_count = 0
+    link = f"https://search.naver.com/search.naver?query={urllib.parse.quote(keyword)}"
+    try:
+        headers = {
+            "X-Naver-Client-Id": NAVER_CLIENT_ID,
+            "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
+        }
+        shop_url = f"https://openapi.naver.com/v1/search/shop.json?query={keyword}&display=1"
+        res = requests.get(shop_url, headers=headers)
         if res.status_code == 200:
             data = res.json()
-            if data.get('keywordList'):
-                # 입력한 키워드와 정확히 일치하는 데이터 찾기
-                target = data['keywordList'][0]
-                # PC + 모바일 검색량 합산 (숫자가 '10미만'으로 올 경우 대비)
-                pc_vol = target.get('monthlyPcQcCnt', 0)
-                mo_vol = target.get('monthlyMobileQcCnt', 0)
-                
-                # '10미만' 텍스트 처리
-                pc_vol = 5 if str(pc_vol) == '< 10' else int(pc_vol)
-                mo_vol = 5 if str(mo_vol) == '< 10' else int(mo_vol)
-                
-                total_vol = pc_vol + mo_vol
-                return total_vol
+            seller_count = data.get('total', 0)
     except Exception as e:
-        print(f"API Error: {e}")
-    return 0
+        print(f"검색 API 에러: {e}")
+        pass
 
-# --- UI 및 서버 로직 ---
+    # 3. 등급 분류 (A: 검색량 대비 상품수가 적음 / B: 경쟁 치열)
+    # 검색량이 0보다 크고, 검색량 100당 상품이 50개 미만일 때 A (비율 0.5 미만)
+    if search_volume > 0 and (seller_count / search_volume) < 0.5:
+        grade = "A (황금)"
+    else:
+        grade = "B (일반)"
 
-HTML_HEAD = """
+    return {
+        "keyword": keyword,
+        "search_volume": search_volume,
+        "seller_count": seller_count,
+        "grade": grade,
+        "link": link
+    }
+
+# --- 웹 페이지 템플릿 ---
+TEMPLATE = """
 <!DOCTYPE html>
 <html>
-<head>
-    <title>Book 통합 분석기 PRO</title>
-    <style>
-        body { font-family: 'Malgun Gothic', sans-serif; padding: 20px; background-color: #f0f2f5; }
-        .container { max-width: 1100px; margin: 0 auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
-        textarea { width: 100%; border: 2px solid #ddd; border-radius: 10px; padding: 15px; font-size: 15px; margin-bottom: 10px; box-sizing: border-box; }
-        button { background-color: #03c75a; color: white; border: none; padding: 15px 30px; border-radius: 10px; cursor: pointer; font-size: 16px; font-weight: bold; width: 100%; }
-        .status { margin: 20px 0; padding: 15px; background: #e7f3ff; border-left: 5px solid #2b82d9; border-radius: 5px; font-weight: bold; }
-        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { border-bottom: 1px solid #eee; padding: 15px; text-align: center; }
-        th { background-color: #f8f9fa; color: #333; }
-        .grade-a { color: #2ecc71; font-weight: bold; }
-        .grade-b { color: #e74c3c; font-weight: bold; }
-        .link-btn { display: inline-block; padding: 5px 10px; background: #eee; border-radius: 5px; text-decoration: none; color: #333; font-size: 12px; }
-    </style>
-</head>
+<head><title>Book 분석기 Pro</title></head>
 <body>
-    <div class="container">
-        <h1>📊 실시간 검색량 기반 분석기</h1>
-        <form method="POST">
-            <textarea name="keywords" rows="6" placeholder="분석할 책 제목들을 입력하세요">{{keywords}}</textarea>
-            <button type="submit">실제 검색량 일괄 조회</button>
-        </form>
+    <h1>📚 도서 키워드 통합 분석기</h1>
+    <form method="POST">
+        <textarea name="keywords" rows="10" cols="70" placeholder="책 제목들을 한 줄에 하나씩 입력하세요">{{keywords}}</textarea><br><br>
+        <button type="submit" style="padding:10px 20px;">일괄 분석 시작</button>
+    </form>
+
+    {% if results %}
+    <hr>
+    <table border="1" style="width:100%; border-collapse: collapse; text-align:center;">
+        <tr style="background-color: #f2f2f2;">
+            <th>키워드</th>
+            <th>월간 총 검색량 (PC+MO)</th>
+            <th>판매 상품 수</th>
+            <th>등급</th>
+            <th>링크</th>
+        </tr>
+        {% for r in results %}
+        <tr>
+            <td>{{r.keyword}}</td>
+            <td>{{ "{:,}".format(r.search_volume) }}</td>
+            <td>{{ "{:,}".format(r.seller_count) }}</td>
+            <td><b>{{r.grade}}</b></td>
+            <td><a href="{{r.link}}" target="_blank">네이버검색</a></td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+</body>
+</html>
 """
 
 @app.route("/", methods=["GET", "POST"])
 def home():
-    if request.method == "GET":
-        return render_template_string(HTML_HEAD + "</div></body></html>", keywords="")
-
-    keywords_text = request.form.get("keywords", "")
-    keywords = [k.strip() for k in keywords_text.split("\n") if k.strip()]
-
-    def generate():
-        yield HTML_HEAD.replace("{{keywords}}", keywords_text)
-        yield f'<div id="progress" class="status">네이버 광고 API 데이터 수집 중...</div>'
-        yield '<table><tr><th>키워드</th><th>월간 총검색량</th><th>분류</th><th>링크</th></tr>'
+    results = []
+    keywords_text = ""
+    if request.method == "POST":
+        keywords_text = request.form.get("keywords", "")
+        keywords = [k.strip() for k in keywords_text.split("\n") if k.strip()]
         
-        for i, keyword in enumerate(keywords):
-            volume = get_real_search_volume(keyword)
-            
-            # 등급 분류 로직 (예: 검색량 500 미만은 경쟁력 있는 A, 그 이상은 B)
-            grade = "A" if 0 < volume < 500 else "B"
-            grade_class = "grade-a" if grade == "A" else "grade-b"
-            
-            search_link = f"https://search.naver.com/search.naver?query={urllib.parse.quote(keyword)}"
-            
-            yield f"""
-            <tr>
-                <td>{keyword}</td>
-                <td>{format(volume, ',')}</td>
-                <td class="{grade_class}">{grade}</td>
-                <td><a href="{search_link}" class="link-btn" target="_blank">검색결과</a></td>
-            </tr>
-            """
-            yield f"<script>document.getElementById('progress').innerHTML = '분석 완료: {i+1} / {len(keywords)}건';</script>"
-            time.sleep(0.2) # API 속도 조절
-            
-        yield "</table></div></body></html>"
+        for keyword in keywords:
+            results.append(analyze_book(keyword))
+            time.sleep(0.15) # API 속도 제한(Rate Limit) 방지를 위한 약간의 대기 시간
 
-    return Response(stream_with_context(generate()))
+    return render_template_string(TEMPLATE, results=results, keywords=keywords_text)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
