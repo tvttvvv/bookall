@@ -31,7 +31,7 @@ def get_ad_header(method, uri):
     }
 
 def analyze_book(keyword):
-    # 1. 총 검색량 조회 (정상 작동 중)
+    # 1. 총 검색량 조회
     search_volume = 0
     try:
         uri = '/keywordstool'
@@ -65,14 +65,13 @@ def analyze_book(keyword):
         print(f"광고 API 에러: {e}")
         search_volume = 0
 
-    # 2. 화면 크롤링 (어설픈 우회 삭제, 가장 엄격하고 정확한 PC 기준으로 복구)
+    # 2. 화면 크롤링 (가장 엄격하고 정확한 PC 기준)
     pc_link = f"https://search.naver.com/search.naver?where=nexearch&query={urllib.parse.quote(keyword)}"
     grade = ""
     reason = ""
     seller_count = 0
 
     try:
-        # 실제 PC 브라우저와 완벽하게 동일한 헤더 설정
         req_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept-Language": "ko-KR,ko;q=0.9",
@@ -81,11 +80,9 @@ def analyze_book(keyword):
         html_res = requests.get(pc_link, headers=req_headers, timeout=5)
         soup = BeautifulSoup(html_res.text, "html.parser")
         
-        # 검색 결과의 메인 영역만 정확히 타겟팅
         main_pack = soup.find(id="main_pack")
         
         if not main_pack:
-            # 캡차 차단 등 예외 상황
             if "captcha" in html_res.text.lower() or "비정상적인" in html_res.text:
                 grade = "오류"
                 reason = "네이버 봇 차단 (일시적 접근 제한)"
@@ -95,7 +92,6 @@ def analyze_book(keyword):
         else:
             main_text = main_pack.get_text(separator=" ", strip=True)
             
-            # 기준 1: 검색 결과 내에 '판매처 N'이라는 글자가 하나라도 있으면 얄짤없이 묶음 상품(B) 처리
             match = re.search(r'(판매처|판매자|판매몰|쇼핑몰)\s*([\d,]+)', main_text)
             
             if match:
@@ -104,16 +100,13 @@ def analyze_book(keyword):
                 grade = "B (일반)"
                 reason = f"대표카드 묶임 ({seller_word} {seller_count}개)"
             else:
-                # 기준 2: 판매처 글자가 없다. 그럼 진짜 '단독 노출 도서(A)'인지 확인
                 is_book_card_exist = False
                 
-                # 도서 카드의 고유 구조를 검사 (어설픈 텍스트 검색 삭제)
                 for bx in main_pack.find_all("div", class_=re.compile(r'api_subject_bx|sc_new|cs_book')):
                     bx_text = bx.get_text(separator=" ", strip=True)
                     title_tag = bx.find(class_=re.compile(r'title|api_title'))
                     title_text = title_tag.get_text() if title_tag else ""
                     
-                    # 제목에 '도서'가 있거나, 카드 안에 '저자'와 '발행'이라는 단어가 세트로 있는 경우만 진짜 책 카드로 인정
                     if ('도서' in title_text or '책정보' in title_text) or ('저자' in bx_text and '발행' in bx_text):
                         is_book_card_exist = True
                         break
@@ -122,7 +115,6 @@ def analyze_book(keyword):
                     grade = "A (황금 🏆)"
                     reason = "대표카드 아님 (단독 노출)"
                 else:
-                    # 기준 3: 판매처 글자도 없고, 도서 카드도 없다면 -> 그냥 블로그나 뜨는 일반 검색어
                     grade = "B (일반)"
                     reason = "도서 검색결과 없음"
 
@@ -140,7 +132,7 @@ def analyze_book(keyword):
         "link": pc_link
     }
 
-# --- 웹 페이지 템플릿 (기존과 완벽 동일) ---
+# --- 웹 페이지 템플릿 ---
 TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -176,7 +168,7 @@ TEMPLATE = """
         <div style="display: flex; align-items: center; margin-top: 10px;">
             <select id="sortOption">
                 <option value="original">입력 순서대로 표시 (원본)</option>
-                <option value="grade">A등급 우선 정렬 (완료 후 자동정렬)</option>
+                <option value="grade">A등급 우선 정렬 (실시간)</option>
             </select>
             <button id="submitBtn" class="btn btn-submit" onclick="startAnalysis()">일괄 분석 시작</button>
         </div>
@@ -214,6 +206,7 @@ TEMPLATE = """
     <script>
         const textarea = document.getElementById('keywordInput');
         const countDisplay = document.getElementById('countDisplay');
+        const sortOptionSelect = document.getElementById('sortOption');
 
         function updateCount() {
             const lines = textarea.value.split('\\n').filter(line => line.trim() !== '');
@@ -221,12 +214,18 @@ TEMPLATE = """
         }
         textarea.addEventListener('input', updateCount);
 
+        // 사용자가 진행 도중에 정렬 옵션을 변경했을 때 즉시 반영
+        sortOptionSelect.addEventListener('change', function() {
+            if (this.value === 'grade') {
+                sortTableByGrade(false); // 알림창 없이 조용히 정렬
+            }
+        });
+
         async function startAnalysis() {
             const btn = document.getElementById('submitBtn');
             const keywordsText = textarea.value;
             const keywords = keywordsText.split('\\n').map(k => k.trim()).filter(k => k !== '');
             const total = keywords.length;
-            const sortOption = document.getElementById('sortOption').value;
 
             if (total === 0) {
                 alert('키워드를 입력해주세요!');
@@ -263,6 +262,11 @@ TEMPLATE = """
                     });
                 }
 
+                // 🔥 핵심: 'A등급 우선 정렬'이 선택되어 있다면, 항목이 추가될 때마다 즉시 다시 정렬
+                if (sortOptionSelect.value === 'grade') {
+                    sortTableByGrade(false);
+                }
+
                 const percent = Math.round(((i + 1) / total) * 100);
                 document.getElementById('progressBar').style.width = percent + '%';
                 
@@ -273,8 +277,9 @@ TEMPLATE = """
             btn.disabled = false;
             btn.innerText = "일괄 분석 시작";
 
-            if (sortOption === 'grade') {
-                sortTableByGrade();
+            // 다 끝난 후 A등급 정렬이었다면 완료 알림창 한 번만 띄우기
+            if (sortOptionSelect.value === 'grade') {
+                sortTableByGrade(true);
             }
         }
 
@@ -301,11 +306,14 @@ TEMPLATE = """
             `;
             tbody.appendChild(tr);
             
-            const container = document.getElementById('tableContainer');
-            container.scrollTop = container.scrollHeight;
+            // 입력 순서(원본) 모드일 때만 스크롤을 맨 아래로 내려줌
+            if (sortOptionSelect.value === 'original') {
+                const container = document.getElementById('tableContainer');
+                container.scrollTop = container.scrollHeight;
+            }
         }
 
-        function sortTableByGrade() {
+        function sortTableByGrade(showAlert = false) {
             const tbody = document.getElementById('resultBody');
             const rows = Array.from(tbody.querySelectorAll('tr'));
             
@@ -318,8 +326,12 @@ TEMPLATE = """
             });
             
             rows.forEach(row => tbody.appendChild(row));
-            document.getElementById('tableContainer').scrollTop = 0;
-            alert("A등급 우선으로 표가 정렬되었습니다!");
+            
+            // 알림을 띄우라고 요청받았을 때(모든 작업이 끝났을 때)만 스크롤 맨 위로 & 알림창 표시
+            if (showAlert) {
+                document.getElementById('tableContainer').scrollTop = 0;
+                alert("분석 완료! A등급 우선으로 표가 정렬되었습니다.");
+            }
         }
 
         function downloadExcel() {
