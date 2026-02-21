@@ -125,7 +125,7 @@ def analyze_book(keyword):
         "link": link
     }
 
-# --- 웹 페이지 템플릿 (UI 및 자바스크립트 추가) ---
+# --- 웹 페이지 템플릿 (정렬 옵션 추가) ---
 TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -138,6 +138,7 @@ TEMPLATE = """
         .btn { padding: 10px 20px; font-weight: bold; cursor: pointer; margin-right: 10px; }
         .btn-excel { background-color: #28a745; color: white; border: none; border-radius: 5px; }
         .btn-submit { background-color: #007bff; color: white; border: none; border-radius: 5px; }
+        select { padding: 9px; font-size: 15px; border-radius: 5px; margin-right: 10px; }
         table { width: 100%; border-collapse: collapse; text-align: center; margin-top: 15px; }
         th, td { border: 1px solid #ddd; padding: 8px; }
         th { background-color: #f2f2f2; }
@@ -151,14 +152,21 @@ TEMPLATE = """
         <form method="POST">
             <textarea id="keywordInput" name="keywords" rows="10" cols="70" placeholder="책 제목들을 한 줄에 하나씩 입력하세요">{{keywords}}</textarea>
             <div class="stats">입력된 키워드: 총 <span id="countDisplay" style="color: blue;">0</span> 건</div>
-            <button type="submit" class="btn btn-submit">일괄 분석 시작</button>
+            
+            <div style="display: flex; align-items: center; margin-top: 10px;">
+                <select name="sort_option">
+                    <option value="original" {% if sort_option == 'original' %}selected{% endif %}>입력 순서대로 (원본)</option>
+                    <option value="grade" {% if sort_option == 'grade' %}selected{% endif %}>A등급 우선 정렬 (A순서)</option>
+                </select>
+                <button type="submit" class="btn btn-submit">일괄 분석 시작</button>
+            </div>
         </form>
     </div>
 
     {% if results %}
     <hr>
     <div style="display: flex; justify-content: space-between; align-items: center;">
-        <h3>분류 결과 (A등급 우선 정렬됨)</h3>
+        <h3>분류 결과</h3>
         <button onclick="downloadExcel()" class="btn btn-excel">📥 엑셀로 다운로드</button>
     </div>
     
@@ -185,24 +193,21 @@ TEMPLATE = """
     {% endif %}
 
     <script>
-        // 1. 실시간 입력 건수 세기 로직
+        // 실시간 입력 건수 세기 로직
         const textarea = document.getElementById('keywordInput');
         const countDisplay = document.getElementById('countDisplay');
 
         function updateCount() {
-            // 빈 줄을 제외하고 실제 글자가 있는 줄만 카운트
             const lines = textarea.value.split('\\n').filter(line => line.trim() !== '');
             countDisplay.textContent = lines.length;
         }
 
-        // 입력할 때마다 숫자 업데이트
         textarea.addEventListener('input', updateCount);
-        // 페이지 로딩 시 초기 숫자 세팅
         window.addEventListener('DOMContentLoaded', updateCount);
 
-        // 2. 엑셀(CSV) 다운로드 로직
+        // 엑셀(CSV) 다운로드 로직
         function downloadExcel() {
-            let csv = '\\uFEFF'; // 한글 깨짐 방지용 BOM
+            let csv = '\\uFEFF'; 
             let rows = document.querySelectorAll("#resultTable tr");
             
             for (let i = 0; i < rows.length; i++) {
@@ -210,18 +215,16 @@ TEMPLATE = """
                 
                 for (let j = 0; j < cols.length; j++) {
                     let data = "";
-                    // 링크 칼럼(<a>태그)일 경우 '확인하기' 대신 실제 URL 주소를 추출
                     if (cols[j].querySelector("a")) {
                         data = cols[j].querySelector("a").href;
                     } else {
-                        data = cols[j].innerText.replace(/"/g, '""'); // 따옴표 처리
+                        data = cols[j].innerText.replace(/"/g, '""'); 
                     }
                     row.push('"' + data + '"');
                 }
                 csv += row.join(",") + "\\n";
             }
             
-            // CSV 파일 생성 및 다운로드 실행
             let blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
             let link = document.createElement("a");
             link.href = URL.createObjectURL(blob);
@@ -240,18 +243,27 @@ TEMPLATE = """
 def home():
     results = []
     keywords_text = ""
+    sort_option = "original" # 기본값은 원본 순서
+    
     if request.method == "POST":
         keywords_text = request.form.get("keywords", "")
+        sort_option = request.form.get("sort_option", "original") # 선택한 정렬 방식 가져오기
         keywords = [k.strip() for k in keywords_text.split("\n") if k.strip()]
         
         for keyword in keywords:
             results.append(analyze_book(keyword))
             time.sleep(0.5) 
 
-        # 3. A등급 우선 정렬 로직 (알파벳 순 정렬: 'A'가 'B'보다 무조건 앞섬)
-        results.sort(key=lambda x: x['grade'])
+        # 정렬 방식에 따라 리스트 순서 변경
+        if sort_option == "grade":
+            results.sort(key=lambda x: x['grade'])
 
-    return render_template_string(TEMPLATE, results=results, keywords=keywords_text)
+    return render_template_string(
+        TEMPLATE, 
+        results=results, 
+        keywords=keywords_text,
+        sort_option=sort_option # 템플릿으로 정렬 옵션 넘겨주기 (선택 상태 유지용)
+    )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
