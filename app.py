@@ -11,7 +11,7 @@ import re
 
 app = Flask(__name__)
 
-# --- 광고 API 설정 (Railway 환경 변수) ---
+# --- 광고 API 설정 ---
 AD_ACCESS_KEY = os.environ.get("ACCESS_KEY", "")
 AD_SECRET_KEY = os.environ.get("SECRET_KEY", "")
 AD_CUSTOMER_ID = os.environ.get("CUSTOMER_ID", "")
@@ -31,6 +31,7 @@ def get_ad_header(method, uri):
     }
 
 def analyze_book(keyword):
+    # 1. 총 검색량 조회 (정상 작동 중)
     search_volume = 0
     try:
         uri = '/keywordstool'
@@ -64,39 +65,38 @@ def analyze_book(keyword):
         print(f"광고 API 에러: {e}")
         search_volume = 0
 
+    # 2. 화면 크롤링 (어설픈 우회 삭제, 가장 엄격하고 정확한 PC 기준으로 복구)
     pc_link = f"https://search.naver.com/search.naver?where=nexearch&query={urllib.parse.quote(keyword)}"
-    scrape_url = f"https://m.search.naver.com/search.naver?where=m&query={urllib.parse.quote(keyword)}"
     grade = ""
     reason = ""
     seller_count = 0
 
     try:
+        # 실제 PC 브라우저와 완벽하게 동일한 헤더 설정
         req_headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-S918N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept-Language": "ko-KR,ko;q=0.9",
-            "Referer": "https://m.naver.com/"
+            "Referer": "https://www.naver.com/"
         }
-        html_res = requests.get(scrape_url, headers=req_headers, timeout=5)
+        html_res = requests.get(pc_link, headers=req_headers, timeout=5)
         soup = BeautifulSoup(html_res.text, "html.parser")
-        page_text = soup.get_text(separator=" ", strip=True)
-
-        if "비정상적인 인터넷 환경" in page_text or "자동 입력 방지" in page_text or "캡차" in page_text:
-            grade = "오류"
-            reason = "서버 IP 네이버 차단됨 (모바일 우회 실패)"
+        
+        # 검색 결과의 메인 영역만 정확히 타겟팅
+        main_pack = soup.find(id="main_pack")
+        
+        if not main_pack:
+            # 캡차 차단 등 예외 상황
+            if "captcha" in html_res.text.lower() or "비정상적인" in html_res.text:
+                grade = "오류"
+                reason = "네이버 봇 차단 (일시적 접근 제한)"
+            else:
+                grade = "B (일반)"
+                reason = "검색결과 없음"
         else:
-            book_area = soup.find(class_=re.compile(r'cs_book|sp_book|book_info|api_subject_bx'))
+            main_text = main_pack.get_text(separator=" ", strip=True)
             
-            if not book_area:
-                for bx in soup.find_all("section", class_="sc_new"):
-                    title_tag = bx.find(class_=re.compile(r'api_title|title'))
-                    if title_tag and ('도서' in title_tag.get_text() or '책' in title_tag.get_text()):
-                        book_area = bx
-                        break
-
-            target_text = book_area.get_text(separator=" ", strip=True) if book_area else page_text
-            
-            match = re.search(r'(판매처|판매자|판매몰|쇼핑몰)\s*([\d,]+)', target_text)
+            # 기준 1: 검색 결과 내에 '판매처 N'이라는 글자가 하나라도 있으면 얄짤없이 묶음 상품(B) 처리
+            match = re.search(r'(판매처|판매자|판매몰|쇼핑몰)\s*([\d,]+)', main_text)
             
             if match:
                 seller_word = match.group(1)
@@ -104,14 +104,25 @@ def analyze_book(keyword):
                 grade = "B (일반)"
                 reason = f"대표카드 묶임 ({seller_word} {seller_count}개)"
             else:
-                is_real_book = ("저자" in target_text or "출판" in target_text or "발행" in target_text)
-                if book_area and is_real_book:
+                # 기준 2: 판매처 글자가 없다. 그럼 진짜 '단독 노출 도서(A)'인지 확인
+                is_book_card_exist = False
+                
+                # 도서 카드의 고유 구조를 검사 (어설픈 텍스트 검색 삭제)
+                for bx in main_pack.find_all("div", class_=re.compile(r'api_subject_bx|sc_new|cs_book')):
+                    bx_text = bx.get_text(separator=" ", strip=True)
+                    title_tag = bx.find(class_=re.compile(r'title|api_title'))
+                    title_text = title_tag.get_text() if title_tag else ""
+                    
+                    # 제목에 '도서'가 있거나, 카드 안에 '저자'와 '발행'이라는 단어가 세트로 있는 경우만 진짜 책 카드로 인정
+                    if ('도서' in title_text or '책정보' in title_text) or ('저자' in bx_text and '발행' in bx_text):
+                        is_book_card_exist = True
+                        break
+                
+                if is_book_card_exist:
                     grade = "A (황금 🏆)"
                     reason = "대표카드 아님 (단독 노출)"
-                elif "저자" in page_text and ("출판" in page_text or "발행" in page_text) and "도서" in page_text:
-                    grade = "A (황금 🏆)"
-                    reason = "대표카드 아님 (전체 텍스트 우회)"
                 else:
+                    # 기준 3: 판매처 글자도 없고, 도서 카드도 없다면 -> 그냥 블로그나 뜨는 일반 검색어
                     grade = "B (일반)"
                     reason = "도서 검색결과 없음"
 
@@ -129,7 +140,7 @@ def analyze_book(keyword):
         "link": pc_link
     }
 
-# --- 웹 페이지 템플릿 (단일 페이지, 비동기 통신 적용) ---
+# --- 웹 페이지 템플릿 (기존과 완벽 동일) ---
 TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -144,19 +155,14 @@ TEMPLATE = """
         .btn-excel { background-color: #28a745; color: white; border: none; border-radius: 5px; }
         .btn-submit { background-color: #007bff; color: white; border: none; border-radius: 5px; }
         select { padding: 9px; font-size: 15px; border-radius: 5px; margin-right: 10px; }
-        
-        /* 프로그레스 바 스타일 추가 */
         .progress-container { margin-top: 15px; padding: 15px; background-color: #f8f9fa; border: 1px solid #ddd; border-radius: 5px; display: none; }
         .progress-text { font-weight: bold; margin-bottom: 8px; font-size: 16px; color: #333; }
         .progress-bar-bg { width: 100%; background-color: #e9ecef; border-radius: 5px; height: 20px; overflow: hidden; }
         .progress-bar-fill { width: 0%; height: 100%; background-color: #007bff; transition: width 0.4s ease; }
-        
         table { width: 100%; border-collapse: collapse; text-align: center; margin-top: 15px; }
         th, td { border: 1px solid #ddd; padding: 8px; }
         th { background-color: #f2f2f2; position: sticky; top: 0; }
         .grade-a { background-color: #e6f7ff; }
-        
-        /* 테이블이 너무 길어질 경우 스크롤 생성 */
         .table-container { max-height: 600px; overflow-y: auto; margin-top: 10px; border-bottom: 1px solid #ddd; display: none; }
     </style>
 </head>
@@ -201,12 +207,11 @@ TEMPLATE = """
                 </tr>
             </thead>
             <tbody id="resultBody">
-                </tbody>
+            </tbody>
         </table>
     </div>
 
     <script>
-        // 1. 글자 수(건수) 실시간 세기
         const textarea = document.getElementById('keywordInput');
         const countDisplay = document.getElementById('countDisplay');
 
@@ -216,7 +221,6 @@ TEMPLATE = """
         }
         textarea.addEventListener('input', updateCount);
 
-        // 2. 비동기 실시간 분석 로직
         async function startAnalysis() {
             const btn = document.getElementById('submitBtn');
             const keywordsText = textarea.value;
@@ -229,7 +233,6 @@ TEMPLATE = """
                 return;
             }
 
-            // UI 초기화 및 시작 준비
             btn.disabled = true;
             btn.innerText = "분석 진행 중...";
             document.getElementById('progressContainer').style.display = 'block';
@@ -237,56 +240,44 @@ TEMPLATE = """
             document.getElementById('tableContainer').style.display = 'block';
             
             const tbody = document.getElementById('resultBody');
-            tbody.innerHTML = ''; // 기존 결과 지우기
+            tbody.innerHTML = ''; 
             document.getElementById('progressBar').style.width = '0%';
 
-            // 키워드 하나씩 서버에 전송 후 결과 받기
             for (let i = 0; i < total; i++) {
                 const kw = keywords[i];
-                
-                // 진행률 UI 업데이트
                 document.getElementById('progressText').innerText = `[${i + 1} / ${total}] "${kw}" 분석 중...`;
                 
                 try {
-                    // 서버 API 호출
                     const response = await fetch('/api/analyze', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ keyword: kw })
                     });
-                    
                     const result = await response.json();
-                    appendRow(result); // 성공 시 테이블에 행 추가
+                    appendRow(result);
                     
                 } catch (error) {
-                    console.error('Error:', error);
-                    // 에러 발생 시 임시 행 추가
                     appendRow({
                         keyword: kw, search_volume: 0, seller_count: "-",
                         grade: "오류", reason: "네트워크 통신 실패", link: "#"
                     });
                 }
 
-                // 게이지 바 업데이트
                 const percent = Math.round(((i + 1) / total) * 100);
                 document.getElementById('progressBar').style.width = percent + '%';
                 
-                // 네이버 봇 차단 방지를 위해 자바스크립트 단에서 0.6초 대기
                 await new Promise(r => setTimeout(r, 600));
             }
 
-            // 모든 분석이 끝났을 때
             document.getElementById('progressText').innerText = `✅ 분석 완료! (총 ${total}건)`;
             btn.disabled = false;
             btn.innerText = "일괄 분석 시작";
 
-            // 정렬 옵션에 따라 마무리 정렬 처리
             if (sortOption === 'grade') {
                 sortTableByGrade();
             }
         }
 
-        // 3. 테이블에 결과 한 줄씩 추가하는 함수
         function appendRow(r) {
             const tbody = document.getElementById('resultBody');
             const tr = document.createElement('tr');
@@ -310,12 +301,10 @@ TEMPLATE = """
             `;
             tbody.appendChild(tr);
             
-            // 새 항목이 추가될 때마다 테이블 스크롤을 가장 아래로 내림
             const container = document.getElementById('tableContainer');
             container.scrollTop = container.scrollHeight;
         }
 
-        // 4. A등급 우선 정렬 함수
         function sortTableByGrade() {
             const tbody = document.getElementById('resultBody');
             const rows = Array.from(tbody.querySelectorAll('tr'));
@@ -323,28 +312,22 @@ TEMPLATE = """
             rows.sort((a, b) => {
                 const gradeA = a.querySelector('td:nth-child(4) span').innerText;
                 const gradeB = b.querySelector('td:nth-child(4) span').innerText;
-                // 'A'가 'B'보다 문자열 순서가 빠르므로 정상 작동
                 if (gradeA < gradeB) return -1;
                 if (gradeA > gradeB) return 1;
                 return 0;
             });
             
-            // 기존 돔 요소를 재배치
             rows.forEach(row => tbody.appendChild(row));
-            
-            // 정렬 후엔 스크롤 맨 위로 올려주기
             document.getElementById('tableContainer').scrollTop = 0;
             alert("A등급 우선으로 표가 정렬되었습니다!");
         }
 
-        // 5. 엑셀 다운로드 로직 (기존과 동일)
         function downloadExcel() {
             let csv = '\\uFEFF'; 
             let rows = document.querySelectorAll("#resultTable tr");
             
             for (let i = 0; i < rows.length; i++) {
                 let row = [], cols = rows[i].querySelectorAll("td, th");
-                
                 for (let j = 0; j < cols.length; j++) {
                     let data = "";
                     if (cols[j].querySelector("a")) {
@@ -371,18 +354,14 @@ TEMPLATE = """
 </html>
 """
 
-# HTML 껍데기를 렌더링하는 기본 페이지
 @app.route("/", methods=["GET"])
 def home():
     return render_template_string(TEMPLATE)
 
-# 자바스크립트가 비동기(AJAX)로 하나씩 요청을 보낼 API 엔드포인트
 @app.route("/api/analyze", methods=["POST"])
 def api_analyze():
     data = request.get_json()
     keyword = data.get("keyword", "")
-    
-    # 1개의 키워드를 검사하고 결과를 딕셔너리로 반환
     result = analyze_book(keyword)
     return jsonify(result)
 
