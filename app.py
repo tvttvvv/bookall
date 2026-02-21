@@ -86,7 +86,7 @@ def analyze_book(keyword):
                 reason = "네이버 봇 차단 (일시적 접근 제한)"
             else:
                 grade = "C (검색불가)"
-                reason = "검색결과 없음"
+                reason = "도서 검색결과 없음"
         else:
             main_text = main_pack.get_text(separator=" ", strip=True)
             
@@ -100,21 +100,26 @@ def analyze_book(keyword):
             else:
                 is_book_card_exist = False
                 
-                for bx in main_pack.find_all("div", class_=re.compile(r'api_subject_bx|sc_new|cs_book')):
-                    bx_text = bx.get_text(separator=" ", strip=True)
-                    title_tag = bx.find(class_=re.compile(r'title|api_title'))
-                    title_text = title_tag.get_text() if title_tag else ""
-                    
-                    if ('도서' in title_text or '책정보' in title_text) or ('저자' in bx_text and '발행' in bx_text):
-                        is_book_card_exist = True
-                        break
+                # 🔥 핵심 수정: 텍스트 유추를 끄고, 명확한 도서 컨테이너 구조가 있는지 깐깐하게 검사
+                # 1. 네이버 도서 고유 클래스(cs_book, sp_book)가 있는지 확인
+                if main_pack.find(class_=re.compile(r'cs_book|sp_book')):
+                    is_book_card_exist = True
+                else:
+                    # 2. 각 섹션 타이틀 중에 명확하게 "도서" 또는 "책정보"가 있는지 확인
+                    for bx in main_pack.find_all("div", class_="api_subject_bx"):
+                        title_tag = bx.find(class_=re.compile(r'api_title|title'))
+                        if title_tag:
+                            title_text = title_tag.get_text(strip=True).replace(" ", "")
+                            if "도서" in title_text or "책정보" in title_text:
+                                is_book_card_exist = True
+                                break
                 
                 if is_book_card_exist:
                     grade = "A (황금 🏆)"
                     reason = "대표카드 아님 (단독 노출)"
                 else:
                     grade = "C (검색불가)"
-                    reason = "도서 검색결과 없음"
+                    reason = "도서 영역 없음"
 
     except Exception as e:
         print(f"크롤링 에러: {e}")
