@@ -35,6 +35,7 @@ def get_ad_header(method, uri):
     }
 
 def analyze_book(keyword, fetch_isbn=False):
+    # 1. 총 검색량 조회 (오탐지 방지 및 0건 처리 완벽 수정)
     search_volume = 0
     try:
         uri = '/keywordstool'
@@ -45,25 +46,19 @@ def analyze_book(keyword, fetch_isbn=False):
         
         if res.status_code == 200:
             data_list = res.json().get('keywordList', [])
-            found = False
             for item in data_list:
                 api_kw = item.get('relKeyword', '').replace(" ", "")
+                # 네이버가 추천한 다른 단어는 무시하고, 내가 찾은 단어와 '정확히' 일치할 때만 검색량 인정
                 if api_kw.lower() == clean_keyword.lower():
                     pc = item.get('monthlyPcQcCnt', 0)
                     mo = item.get('monthlyMobileQcCnt', 0)
-                    if isinstance(pc, str): pc = 10
-                    if isinstance(mo, str): mo = 10
+                    
+                    # 네이버가 '< 10' 으로 퉁쳐서 보내는 값은 모두 0으로 얄짤없이 처리 (20 버그 해결)
+                    if isinstance(pc, str): pc = 0
+                    if isinstance(mo, str): mo = 0
+                    
                     search_volume = pc + mo
-                    found = True
                     break
-            
-            if not found and len(data_list) > 0:
-                item = data_list[0]
-                pc = item.get('monthlyPcQcCnt', 0)
-                mo = item.get('monthlyMobileQcCnt', 0)
-                if isinstance(pc, str): pc = 10
-                if isinstance(mo, str): mo = 10
-                search_volume = pc + mo
     except Exception as e:
         print(f"광고 API 에러: {e}")
         search_volume = 0
@@ -125,7 +120,6 @@ def analyze_book(keyword, fetch_isbn=False):
         grade = "오류"
         reason = "일시적 스크래핑 실패"
 
-    # 🔥 완벽하게 수정된 ISBN 추출 로직
     isbn = "-"
     if grade == "B (일반)" and fetch_isbn:
         try:
@@ -134,7 +128,6 @@ def analyze_book(keyword, fetch_isbn=False):
                 "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
             }
             
-            # API가 찰떡같이 찾을 수 있게 검색어 끝의 '책' 글자 제거
             api_keyword = keyword
             if api_keyword.endswith("책") and len(api_keyword) > 1:
                 api_keyword = api_keyword[:-1]
@@ -158,7 +151,6 @@ def analyze_book(keyword, fetch_isbn=False):
                 
                 found_valid = False
                 for candidate in reversed(isbns):
-                    # 9 또는 8로 시작하는 진짜 종이책 ISBN 만 추출
                     if candidate.startswith('9') or candidate.startswith('8'):
                         isbn = candidate
                         found_valid = True
@@ -180,7 +172,7 @@ def analyze_book(keyword, fetch_isbn=False):
         "link": pc_link
     }
 
-# --- 웹 페이지 템플릿 (UI 동일) ---
+# --- 웹 페이지 템플릿 ---
 TEMPLATE = """
 <!DOCTYPE html>
 <html>
