@@ -34,7 +34,8 @@ def get_ad_header(method, uri):
         "X-Signature": signature
     }
 
-def analyze_book(keyword, fetch_isbn=False):
+# ✨ [수정됨] min_search_volume(최소 검색량) 파라미터 추가 ✨
+def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
     search_volume = 0
     try:
         uri = '/keywordstool'
@@ -57,7 +58,6 @@ def analyze_book(keyword, fetch_isbn=False):
                     search_volume = pc + mo
                     break
     except Exception as e:
-        print(f"광고 API 에러: {e}")
         search_volume = 0
 
     pc_link = f"https://search.naver.com/search.naver?where=nexearch&query={urllib.parse.quote(keyword)}"
@@ -105,9 +105,14 @@ def analyze_book(keyword, fetch_isbn=False):
                                 is_book_card_exist = True
                                 break
                 
+                # ✨ [핵심 로직] 구조상 A등급이라도, 설정한 최소 검색량을 넘지 못하면 C등급으로 강등! ✨
                 if is_book_card_exist:
-                    grade = "A (황금 🏆)"
-                    reason = "대표카드 아님 (단독 노출)"
+                    if search_volume >= min_search_volume:
+                        grade = "A (황금 🏆)"
+                        reason = "대표카드 아님 (단독 노출)"
+                    else:
+                        grade = "C (검색량 부족)"
+                        reason = f"단독 노출 (단, 검색량 {min_search_volume} 미만)"
                 else:
                     grade = "C (검색불가)"
                     reason = "도서 영역 없음"
@@ -196,6 +201,10 @@ TEMPLATE = """
         .grade-a { background-color: #e6f7ff; }
         .grade-c { background-color: #fcfcfc; color: #777; }
         .table-container { max-height: 600px; overflow-y: auto; margin-top: 10px; border-bottom: 1px solid #ddd; display: none; }
+        
+        /* 추가된 A등급 필터 인풋 디자인 */
+        .filter-box { display: flex; align-items: center; margin-right: 15px; font-weight: bold; font-size: 14px; background: #e9ecef; padding: 5px 10px; border-radius: 5px;}
+        .filter-box input { width: 60px; padding: 5px; border: 1px solid #ccc; border-radius: 4px; text-align: center; margin: 0 5px; font-weight: bold;}
     </style>
 </head>
 <body>
@@ -207,8 +216,14 @@ TEMPLATE = """
         <div style="display: flex; align-items: center; margin-top: 10px;">
             <label class="toggle-wrapper">
                 <div class="switch"><input type="checkbox" id="isbnToggle" checked><span class="slider"></span></div>
-                B등급 ISBN 추출 (켜짐)
+                B등급 ISBN (켜짐)
             </label>
+            
+            <div class="filter-box">
+                <label for="minVolume">A등급 최소 검색량:</label>
+                <input type="number" id="minVolume" value="0" min="0"> 이상
+            </div>
+
             <select id="sortOption">
                 <option value="original">입력 순서대로 표시 (원본)</option>
                 <option value="grade">A등급 우선 정렬 (A → C → B)</option>
@@ -251,7 +266,7 @@ TEMPLATE = """
         const isbnToggle = document.getElementById('isbnToggle');
 
         isbnToggle.addEventListener('change', function() {
-            this.parentElement.nextSibling.textContent = this.checked ? " B등급 ISBN 추출 (켜짐)" : " B등급 ISBN 추출 (꺼짐)";
+            this.parentElement.nextSibling.textContent = this.checked ? " B등급 ISBN (켜짐)" : " B등급 ISBN (꺼짐)";
         });
 
         function updateCount() {
@@ -291,6 +306,9 @@ TEMPLATE = """
             const keywords = textarea.value.split('\\n').map(k => k.trim()).filter(k => k !== '');
             const total = keywords.length;
             const fetchIsbn = isbnToggle.checked; 
+            
+            // ✨ [신규 추가] 입력한 최소 검색량 가져오기 ✨
+            const minVol = parseInt(document.getElementById('minVolume').value) || 0;
 
             if (total === 0) { alert('키워드를 입력해주세요!'); return; }
 
@@ -310,10 +328,11 @@ TEMPLATE = """
                 
                 let rowData = null;
                 try {
+                    // API 요청에 최소 검색량(min_search_volume) 파라미터 추가
                     const response = await fetch('/api/analyze', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ keyword: kw, fetch_isbn: fetchIsbn })
+                        body: JSON.stringify({ keyword: kw, fetch_isbn: fetchIsbn, min_search_volume: minVol })
                     });
                     rowData = await response.json();
                 } catch (error) {
@@ -348,7 +367,6 @@ TEMPLATE = """
             let gradeColor = 'black';
             let reasonHtml = r.reason;
 
-            // ✨ A등급일 때 프론트엔드 화면에 웹훅(2번서버 전송) 상태 띄우기 ✨
             if (isGradeA) {
                 gradeColor = 'blue';
                 let whMsg = r.webhook_status || '응답 없음';
@@ -411,11 +429,12 @@ def api_analyze():
     data = request.get_json()
     keyword = data.get("keyword", "")
     fetch_isbn = data.get("fetch_isbn", False)
+    # ✨ API 요청에서 최소 검색량 값을 받아옵니다 (기본값 0) ✨
+    min_search_volume = int(data.get("min_search_volume", 0))
     
-    result = analyze_book(keyword, fetch_isbn=fetch_isbn)
+    result = analyze_book(keyword, fetch_isbn=fetch_isbn, min_search_volume=min_search_volume)
     result['webhook_status'] = '대기'
     
-    # ✨✨ [신규 추가] A등급(황금)이 발견되면 2번 서버로 웹훅 쏘기! ✨✨
     grade = result.get("grade", "")
     if "A" in grade:
         webhook_url = os.environ.get("STUDYBOX_WEBHOOK_URL", "").strip()
