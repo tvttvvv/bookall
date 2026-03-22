@@ -35,7 +35,6 @@ def get_ad_header(method, uri):
     }
 
 def analyze_book(keyword, fetch_isbn=False):
-    # 1. 총 검색량 조회 (오탐지 방지 및 0건 처리 완벽 수정)
     search_volume = 0
     try:
         uri = '/keywordstool'
@@ -48,12 +47,10 @@ def analyze_book(keyword, fetch_isbn=False):
             data_list = res.json().get('keywordList', [])
             for item in data_list:
                 api_kw = item.get('relKeyword', '').replace(" ", "")
-                # 네이버가 추천한 다른 단어는 무시하고, 내가 찾은 단어와 '정확히' 일치할 때만 검색량 인정
                 if api_kw.lower() == clean_keyword.lower():
                     pc = item.get('monthlyPcQcCnt', 0)
                     mo = item.get('monthlyMobileQcCnt', 0)
                     
-                    # 네이버가 '< 10' 으로 퉁쳐서 보내는 값은 모두 0으로 얄짤없이 처리 (20 버그 해결)
                     if isinstance(pc, str): pc = 0
                     if isinstance(mo, str): mo = 0
                     
@@ -172,7 +169,7 @@ def analyze_book(keyword, fetch_isbn=False):
         "link": pc_link
     }
 
-# --- 웹 페이지 템플릿 ---
+# --- 웹 페이지 템플릿 (자바스크립트 특수문자 버그 완벽 수정!) ---
 TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -276,6 +273,7 @@ TEMPLATE = """
         });
 
         function updateCount() {
+            // 백슬래시 보호!
             const lines = textarea.value.split('\\n').filter(line => line.trim() !== '');
             countDisplay.textContent = lines.length;
         }
@@ -330,6 +328,7 @@ TEMPLATE = """
         async function startAnalysis() {
             const btn = document.getElementById('submitBtn');
             const keywordsText = textarea.value;
+            // 백슬래시 보호!
             const keywords = keywordsText.split('\\n').map(k => k.trim()).filter(k => k !== '');
             const total = keywords.length;
             const fetchIsbn = isbnToggle.checked; 
@@ -416,7 +415,8 @@ TEMPLATE = """
         }
 
         function downloadExcel() {
-            let csv = '\uFEFF'; 
+            // 백슬래시 보호!
+            let csv = '\\uFEFF'; 
             let rows = document.querySelectorAll("#resultTable tr");
             
             for (let i = 0; i < rows.length; i++) {
@@ -433,7 +433,8 @@ TEMPLATE = """
                     }
                     row.push('"' + data + '"');
                 }
-                csv += row.join(",") + "\n";
+                // 백슬래시 보호!
+                csv += row.join(",") + "\\n";
             }
             
             let blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
