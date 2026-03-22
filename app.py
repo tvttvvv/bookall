@@ -63,7 +63,7 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
     grade = ""
     reason = ""
     seller_count = 0
-    shipping_fee = "-" # ✨ [신규] 배송비 기본값
+    shipping_fee = "-" # ✨ 배송비 스크래핑 기능 제거, 무조건 빈칸(-)으로 설정
 
     try:
         req_headers = {
@@ -86,14 +86,6 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
         else:
             main_text = main_pack.get_text(separator=" ", strip=True)
             match = re.search(r'(판매처|판매자|판매몰|쇼핑몰)\s*([\d,]+)', main_text)
-            
-            # ✨ [핵심] 네이버 화면에서 배송비 글씨를 스마트하게 스크래핑 ✨
-            if "무료배송" in main_text or "배송비 무료" in main_text or "배송비 0원" in main_text:
-                shipping_fee = "무료"
-            else:
-                ship_match = re.search(r'배송비\s*([\d,]+)원', main_text)
-                if ship_match:
-                    shipping_fee = f"{ship_match.group(1)}원"
             
             if match:
                 seller_word = match.group(1)
@@ -175,7 +167,7 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
         "reason": reason,
         "isbn": isbn,
         "link": pc_link,
-        "shipping_fee": shipping_fee # ✨ [신규] 스터디박스로 진짜 배송비 데이터 전송!
+        "shipping_fee": shipping_fee
     }
 
 TEMPLATE = """
@@ -391,7 +383,7 @@ TEMPLATE = """
         }
 
         function downloadExcel() {
-            let csv = '\\uFEFF'; 
+            let csv = '\uFEFF'; 
             let rows = document.querySelectorAll("#resultTable tr");
             for (let i = 0; i < rows.length; i++) {
                 let row = [], cols = rows[i].querySelectorAll("td, th");
@@ -400,12 +392,12 @@ TEMPLATE = """
                     if (cols[j].querySelector("a")) {
                         data = cols[j].querySelector("a").href;
                     } else {
-                        data = cols[j].innerText.replace(/"/g, '""').replace(/\\n/g, " "); 
+                        data = cols[j].innerText.replace(/"/g, '""').replace(/\n/g, " "); 
                         if (j === 5 && data !== "-" && data !== "ISBN (B등급)") data = '="' + data + '"';
                     }
                     row.push('"' + data + '"');
                 }
-                csv += row.join(",") + "\\n";
+                csv += row.join(",") + "\n";
             }
             let blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
             let link = document.createElement("a");
