@@ -416,7 +416,7 @@ TEMPLATE = """
         }
 
         function downloadExcel() {
-            let csv = '\\uFEFF'; 
+            let csv = '\uFEFF'; 
             let rows = document.querySelectorAll("#resultTable tr");
             
             for (let i = 0; i < rows.length; i++) {
@@ -433,7 +433,7 @@ TEMPLATE = """
                     }
                     row.push('"' + data + '"');
                 }
-                csv += row.join(",") + "\\n";
+                csv += row.join(",") + "\n";
             }
             
             let blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -461,6 +461,21 @@ def api_analyze():
     fetch_isbn = data.get("fetch_isbn", False)
     
     result = analyze_book(keyword, fetch_isbn=fetch_isbn)
+    
+    # ✨✨ [신규 추가] A등급(황금)이 발견되면 2번 서버로 웹훅 쏘기! ✨✨
+    grade = result.get("grade", "")
+    if "A" in grade:
+        # [필독] 1번 서버의 Railway 환경변수에 2번 서버 웹훅 주소를 세팅해주세요.
+        # 변수명: STUDYBOX_WEBHOOK_URL
+        # 값 예시: https://스토어매니저-주소/monitoring/api/webhook
+        webhook_url = os.environ.get("STUDYBOX_WEBHOOK_URL", "")
+        if webhook_url:
+            try:
+                # 1번 서버가 느려지지 않게 timeout을 3초로 짧게 설정
+                requests.post(webhook_url, json=result, timeout=3)
+            except Exception as e:
+                print(f"웹훅 전송 에러 (2번 서버 꺼짐 등): {e}")
+
     return jsonify(result)
 
 if __name__ == "__main__":
