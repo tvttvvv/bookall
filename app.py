@@ -8,7 +8,6 @@ import base64
 import urllib.parse
 import os
 import re
-import random
 
 app = Flask(__name__)
 
@@ -30,47 +29,6 @@ def get_ad_header(method, uri):
         "X-Customer": str(AD_CUSTOMER_ID),
         "X-Signature": signature
     }
-
-# ✨ [신규 하이브리드 엔진] 가짜 한국 IP + 모바일 위장 + API 백업
-def get_real_store_rank(keyword, target_store="스터디박스"):
-    # 가짜 한국 IP 생성
-    fake_ip = f"211.{random.randint(10, 250)}.{random.randint(10, 250)}.{random.randint(10, 250)}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-        "X-Forwarded-For": fake_ip,
-        "Accept-Language": "ko-KR,ko;q=0.9"
-    }
-    
-    # 1. 모바일 쇼핑 위장 스크래핑 시도
-    try:
-        url = f"https://msearch.shopping.naver.com/search/all?query={urllib.parse.quote(keyword)}"
-        res = requests.get(url, headers=headers, timeout=5)
-        
-        if "captcha" not in res.text.lower() and "비정상적인" not in res.text:
-            if target_store in res.text:
-                names = re.findall(r'"mallName":"([^"]+)"', res.text)
-                for idx, name in enumerate(names, start=1):
-                    if target_store in name: return str(idx)
-                return "순위 밖"
-    except Exception:
-        pass
-
-    # 2. 스크래핑이 차단당했거나 실패하면 API로 즉시 전환 (폴백)
-    try:
-        if NAVER_CLIENT_ID and NAVER_CLIENT_SECRET:
-            api_headers = {"X-Naver-Client-Id": NAVER_CLIENT_ID, "X-Naver-Client-Secret": NAVER_CLIENT_SECRET}
-            for start_idx in [1, 101]: # API는 빠르니까 200위까지만 검사
-                api_url = f"https://openapi.naver.com/v1/search/shop.json?query={urllib.parse.quote(keyword)}&display=100&start={start_idx}"
-                api_res = requests.get(api_url, headers=api_headers, timeout=5)
-                if api_res.status_code == 200:
-                    for idx, item in enumerate(api_res.json().get('items', [])):
-                        if target_store in item.get('mallName', ''):
-                            return str(start_idx + idx)
-                time.sleep(0.1)
-    except Exception:
-        return "탐색 실패"
-
-    return "순위 밖"
 
 def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
     search_volume = 0
@@ -179,7 +137,29 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
         except:
             isbn = "조회 실패"
 
-    store_rank = get_real_store_rank(keyword, "스터디박스")
+    # ✨ [순수 API 탐색] 네이버 쇼핑 API를 이용해 500위까지 샅샅이 검색!
+    store_rank = "500위 밖"
+    try:
+        if NAVER_CLIENT_ID and NAVER_CLIENT_SECRET:
+            api_headers = {"X-Naver-Client-Id": NAVER_CLIENT_ID, "X-Naver-Client-Secret": NAVER_CLIENT_SECRET}
+            found_rank = False
+            for start_idx in [1, 101, 201, 301, 401]:
+                api_url = f"https://openapi.naver.com/v1/search/shop.json?query={urllib.parse.quote(keyword)}&display=100&start={start_idx}"
+                api_res = requests.get(api_url, headers=api_headers, timeout=5)
+                if api_res.status_code == 200:
+                    items = api_res.json().get('items', [])
+                    for idx, item in enumerate(items):
+                        if "스터디박스" in item.get('mallName', ''):
+                            store_rank = str(start_idx + idx)
+                            found_rank = True
+                            break
+                else:
+                    if start_idx == 1: store_rank = "API에러"
+                    break
+                if found_rank: break
+                time.sleep(0.1) # API 호출 제한 방지
+    except:
+        store_rank = "탐색 실패"
 
     return {
         "keyword": keyword,
