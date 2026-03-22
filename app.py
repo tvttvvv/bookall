@@ -16,7 +16,7 @@ AD_ACCESS_KEY = os.environ.get("ACCESS_KEY", "")
 AD_SECRET_KEY = os.environ.get("SECRET_KEY", "")
 AD_CUSTOMER_ID = os.environ.get("CUSTOMER_ID", "")
 
-# --- 검색 API 설정 (ISBN 조회용) ---
+# --- 검색 API 설정 (ISBN 및 쇼핑 순위 조회용) ---
 NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "")
 
@@ -63,7 +63,7 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
     grade = ""
     reason = ""
     seller_count = 0
-    shipping_fee = "-" # ✨ 배송비 스크래핑 기능 제거, 무조건 빈칸(-)으로 설정
+    shipping_fee = "-"
 
     try:
         req_headers = {
@@ -159,6 +159,28 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
         except Exception as e:
             isbn = "조회 실패"
 
+    # ✨ [핵심 추가] 네이버 쇼핑 API를 이용해 '스터디박스' 상점의 순위 찾기 ✨
+    store_rank = "-"
+    try:
+        if NAVER_CLIENT_ID and NAVER_CLIENT_SECRET:
+            shop_headers = {
+                "X-Naver-Client-Id": NAVER_CLIENT_ID,
+                "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
+            }
+            # 디스플레이 100개(1페이지 최대치)를 가져와서 검사
+            shop_api_url = f"https://openapi.naver.com/v1/search/shop.json?query={urllib.parse.quote(keyword)}&display=100"
+            shop_res = requests.get(shop_api_url, headers=shop_headers, timeout=5)
+            
+            if shop_res.status_code == 200:
+                shop_items = shop_res.json().get('items', [])
+                for idx, item in enumerate(shop_items):
+                    # 상점명이 '스터디박스'인지 확인
+                    if "스터디박스" in item.get('mallName', ''):
+                        store_rank = str(idx + 1)
+                        break
+    except Exception as e:
+        print(f"쇼핑 순위 API 에러: {e}")
+
     return {
         "keyword": keyword,
         "search_volume": search_volume,
@@ -167,7 +189,8 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
         "reason": reason,
         "isbn": isbn,
         "link": pc_link,
-        "shipping_fee": shipping_fee
+        "shipping_fee": shipping_fee,
+        "store_rank": store_rank # ✨ 찾은 순위를 2번 서버로 같이 쏴줍니다.
     }
 
 TEMPLATE = """
