@@ -113,7 +113,6 @@ def analyze_book(keyword, fetch_isbn=False):
                     reason = "도서 영역 없음"
 
     except Exception as e:
-        print(f"크롤링 에러: {e}")
         grade = "오류"
         reason = "일시적 스크래핑 실패"
 
@@ -152,11 +151,8 @@ def analyze_book(keyword, fetch_isbn=False):
                         isbn = candidate
                         found_valid = True
                         break
-                
-                if found_valid:
-                    break
+                if found_valid: break
         except Exception as e:
-            print(f"ISBN API 에러: {e}")
             isbn = "조회 실패"
 
     return {
@@ -169,7 +165,6 @@ def analyze_book(keyword, fetch_isbn=False):
         "link": pc_link
     }
 
-# --- 웹 페이지 템플릿 (자바스크립트 특수문자 버그 완벽 수정!) ---
 TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -184,7 +179,6 @@ TEMPLATE = """
         .btn-excel { background-color: #28a745; color: white; border: none; border-radius: 5px; }
         .btn-submit { background-color: #007bff; color: white; border: none; border-radius: 5px; }
         select { padding: 9px; font-size: 15px; border-radius: 5px; margin-right: 10px; }
-        
         .toggle-wrapper { display: flex; align-items: center; margin-right: 15px; cursor: pointer; font-weight: bold; font-size: 14px; }
         .switch { position: relative; display: inline-block; width: 44px; height: 24px; margin-right: 8px; }
         .switch input { opacity: 0; width: 0; height: 0; }
@@ -192,19 +186,15 @@ TEMPLATE = """
         .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
         input:checked + .slider { background-color: #007bff; }
         input:checked + .slider:before { transform: translateX(20px); }
-
         .progress-container { margin-top: 15px; padding: 15px; background-color: #f8f9fa; border: 1px solid #ddd; border-radius: 5px; display: none; }
         .progress-text { font-weight: bold; margin-bottom: 8px; font-size: 16px; color: #333; }
         .progress-bar-bg { width: 100%; background-color: #e9ecef; border-radius: 5px; height: 20px; overflow: hidden; }
         .progress-bar-fill { width: 0%; height: 100%; background-color: #007bff; transition: width 0.4s ease; }
-        
         table { width: 100%; border-collapse: collapse; text-align: center; margin-top: 15px; }
         th, td { border: 1px solid #ddd; padding: 8px; }
         th { background-color: #f2f2f2; position: sticky; top: 0; }
-        
         .grade-a { background-color: #e6f7ff; }
         .grade-c { background-color: #fcfcfc; color: #777; }
-        
         .table-container { max-height: 600px; overflow-y: auto; margin-top: 10px; border-bottom: 1px solid #ddd; display: none; }
     </style>
 </head>
@@ -214,16 +204,11 @@ TEMPLATE = """
     <div class="input-area">
         <textarea id="keywordInput" rows="10" cols="70" placeholder="책 제목들을 한 줄에 하나씩 입력하세요"></textarea>
         <div class="stats">입력된 키워드: 총 <span id="countDisplay" style="color: blue;">0</span> 건</div>
-        
         <div style="display: flex; align-items: center; margin-top: 10px;">
             <label class="toggle-wrapper">
-                <div class="switch">
-                    <input type="checkbox" id="isbnToggle" checked>
-                    <span class="slider"></span>
-                </div>
+                <div class="switch"><input type="checkbox" id="isbnToggle" checked><span class="slider"></span></div>
                 B등급 ISBN 추출 (켜짐)
             </label>
-
             <select id="sortOption">
                 <option value="original">입력 순서대로 표시 (원본)</option>
                 <option value="grade">A등급 우선 정렬 (A → C → B)</option>
@@ -234,9 +219,7 @@ TEMPLATE = """
 
     <div id="progressContainer" class="progress-container">
         <div id="progressText" class="progress-text">대기 중...</div>
-        <div class="progress-bar-bg">
-            <div id="progressBar" class="progress-bar-fill"></div>
-        </div>
+        <div class="progress-bar-bg"><div id="progressBar" class="progress-bar-fill"></div></div>
     </div>
 
     <div id="resultHeader" style="display: flex; justify-content: space-between; align-items: center; display: none; margin-top: 20px;">
@@ -257,8 +240,7 @@ TEMPLATE = """
                     <th>링크</th>
                 </tr>
             </thead>
-            <tbody id="resultBody">
-            </tbody>
+            <tbody id="resultBody"></tbody>
         </table>
     </div>
 
@@ -273,15 +255,12 @@ TEMPLATE = """
         });
 
         function updateCount() {
-            // 백슬래시 보호!
             const lines = textarea.value.split('\\n').filter(line => line.trim() !== '');
             countDisplay.textContent = lines.length;
         }
         textarea.addEventListener('input', updateCount);
 
-        sortOptionSelect.addEventListener('change', function() {
-            applyCurrentSort();
-        });
+        sortOptionSelect.addEventListener('change', function() { applyCurrentSort(); });
 
         function applyCurrentSort() {
             const tbody = document.getElementById('resultBody');
@@ -292,51 +271,28 @@ TEMPLATE = """
                 rows.sort((a, b) => {
                     const textA = a.querySelector('td:nth-child(4) span').innerText;
                     const textB = b.querySelector('td:nth-child(4) span').innerText;
-                    
-                    let scoreA = 4;
-                    if (textA.includes('A')) scoreA = 1;
-                    else if (textA.includes('C')) scoreA = 2;
-                    else if (textA.includes('B')) scoreA = 3;
-
-                    let scoreB = 4;
-                    if (textB.includes('A')) scoreB = 1;
-                    else if (textB.includes('C')) scoreB = 2;
-                    else if (textB.includes('B')) scoreB = 3;
-                    
-                    if (scoreA === scoreB) {
-                        return parseInt(a.getAttribute('data-index')) - parseInt(b.getAttribute('data-index'));
-                    }
+                    let scoreA = textA.includes('A') ? 1 : (textA.includes('C') ? 2 : 3);
+                    let scoreB = textB.includes('A') ? 1 : (textB.includes('C') ? 2 : 3);
+                    if (scoreA === scoreB) return parseInt(a.getAttribute('data-index')) - parseInt(b.getAttribute('data-index'));
                     return scoreA - scoreB;
                 });
-                
                 tbody.innerHTML = '';
                 rows.forEach(row => tbody.appendChild(row));
                 document.getElementById('tableContainer').scrollTop = 0;
             } else {
-                rows.sort((a, b) => {
-                    return parseInt(a.getAttribute('data-index')) - parseInt(b.getAttribute('data-index'));
-                });
-                
+                rows.sort((a, b) => parseInt(a.getAttribute('data-index')) - parseInt(b.getAttribute('data-index')));
                 tbody.innerHTML = '';
                 rows.forEach(row => tbody.appendChild(row));
-                
-                const container = document.getElementById('tableContainer');
-                container.scrollTop = container.scrollHeight;
             }
         }
 
         async function startAnalysis() {
             const btn = document.getElementById('submitBtn');
-            const keywordsText = textarea.value;
-            // 백슬래시 보호!
-            const keywords = keywordsText.split('\\n').map(k => k.trim()).filter(k => k !== '');
+            const keywords = textarea.value.split('\\n').map(k => k.trim()).filter(k => k !== '');
             const total = keywords.length;
             const fetchIsbn = isbnToggle.checked; 
 
-            if (total === 0) {
-                alert('키워드를 입력해주세요!');
-                return;
-            }
+            if (total === 0) { alert('키워드를 입력해주세요!'); return; }
 
             btn.disabled = true;
             btn.innerText = "분석 진행 중...";
@@ -361,10 +317,7 @@ TEMPLATE = """
                     });
                     rowData = await response.json();
                 } catch (error) {
-                    rowData = {
-                        keyword: kw, search_volume: 0, seller_count: "-",
-                        grade: "오류", reason: "네트워크 통신 실패", isbn: "-", link: "#"
-                    };
+                    rowData = { keyword: kw, search_volume: 0, seller_count: "-", grade: "오류", reason: "네트워크 실패", isbn: "-", link: "#", webhook_status: "통신 실패" };
                 }
 
                 rowData.original_index = i;
@@ -372,8 +325,6 @@ TEMPLATE = """
 
                 const percent = Math.round(((i + 1) / total) * 100);
                 document.getElementById('progressBar').style.width = percent + '%';
-                
-                await new Promise(r => setTimeout(r, 600));
             }
 
             document.getElementById('progressText').innerText = `✅ 분석 완료! (총 ${total}건)`;
@@ -384,7 +335,6 @@ TEMPLATE = """
         function appendRow(r) {
             const tbody = document.getElementById('resultBody');
             const tr = document.createElement('tr');
-            
             tr.setAttribute('data-index', r.original_index);
             
             const isGradeA = r.grade.includes('A');
@@ -396,7 +346,15 @@ TEMPLATE = """
             const svFormat = r.search_volume > 0 ? r.search_volume.toLocaleString() : '0';
             
             let gradeColor = 'black';
-            if (isGradeA) gradeColor = 'blue';
+            let reasonHtml = r.reason;
+
+            // ✨ A등급일 때 프론트엔드 화면에 웹훅(2번서버 전송) 상태 띄우기 ✨
+            if (isGradeA) {
+                gradeColor = 'blue';
+                let whMsg = r.webhook_status || '응답 없음';
+                let whColor = whMsg.includes('성공') ? 'green' : 'red';
+                reasonHtml += `<br><span style="color:${whColor}; font-size:0.85em; font-weight:bold;">[스터디박스 전송: ${whMsg}]</span>`;
+            }
             else if (isGradeC) gradeColor = '#f0ad4e'; 
             else if (r.grade.includes('오류')) gradeColor = 'red';
 
@@ -405,20 +363,17 @@ TEMPLATE = """
                 <td>${svFormat}</td>
                 <td><b style="color:#d9534f;">${r.seller_count}</b></td>
                 <td><span style="color: ${gradeColor}; font-weight:bold;">${r.grade}</span></td>
-                <td style="color: gray; font-size: 0.9em;">${r.reason}</td>
+                <td style="color: gray; font-size: 0.9em;">${reasonHtml}</td>
                 <td style="font-family: monospace; color: #555;">${r.isbn || '-'}</td>
                 <td><a href="${r.link}" target="_blank">확인하기</a></td>
             `;
             tbody.appendChild(tr);
-            
             applyCurrentSort();
         }
 
         function downloadExcel() {
-            // 백슬래시 보호!
             let csv = '\\uFEFF'; 
             let rows = document.querySelectorAll("#resultTable tr");
-            
             for (let i = 0; i < rows.length; i++) {
                 let row = [], cols = rows[i].querySelectorAll("td, th");
                 for (let j = 0; j < cols.length; j++) {
@@ -426,17 +381,13 @@ TEMPLATE = """
                     if (cols[j].querySelector("a")) {
                         data = cols[j].querySelector("a").href;
                     } else {
-                        data = cols[j].innerText.replace(/"/g, '""'); 
-                        if (j === 5 && data !== "-" && data !== "ISBN (B등급)") {
-                            data = '="' + data + '"';
-                        }
+                        data = cols[j].innerText.replace(/"/g, '""').replace(/\\n/g, " "); 
+                        if (j === 5 && data !== "-" && data !== "ISBN (B등급)") data = '="' + data + '"';
                     }
                     row.push('"' + data + '"');
                 }
-                // 백슬래시 보호!
                 csv += row.join(",") + "\\n";
             }
-            
             let blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
             let link = document.createElement("a");
             link.href = URL.createObjectURL(blob);
@@ -462,20 +413,23 @@ def api_analyze():
     fetch_isbn = data.get("fetch_isbn", False)
     
     result = analyze_book(keyword, fetch_isbn=fetch_isbn)
+    result['webhook_status'] = '대기'
     
     # ✨✨ [신규 추가] A등급(황금)이 발견되면 2번 서버로 웹훅 쏘기! ✨✨
     grade = result.get("grade", "")
     if "A" in grade:
-        # [필독] 1번 서버의 Railway 환경변수에 2번 서버 웹훅 주소를 세팅해주세요.
-        # 변수명: STUDYBOX_WEBHOOK_URL
-        # 값 예시: https://스토어매니저-주소/monitoring/api/webhook
-        webhook_url = os.environ.get("STUDYBOX_WEBHOOK_URL", "")
-        if webhook_url:
+        webhook_url = os.environ.get("STUDYBOX_WEBHOOK_URL", "").strip()
+        if not webhook_url:
+            result['webhook_status'] = '환경변수 누락 (전송불가)'
+        else:
             try:
-                # 1번 서버가 느려지지 않게 timeout을 3초로 짧게 설정
-                requests.post(webhook_url, json=result, timeout=3)
+                res = requests.post(webhook_url, json=result, timeout=5)
+                if res.status_code == 200:
+                    result['webhook_status'] = '성공!'
+                else:
+                    result['webhook_status'] = f'서버 거절 ({res.status_code})'
             except Exception as e:
-                print(f"웹훅 전송 에러 (2번 서버 꺼짐 등): {e}")
+                result['webhook_status'] = '통신 에러'
 
     return jsonify(result)
 
