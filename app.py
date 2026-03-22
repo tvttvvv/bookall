@@ -11,12 +11,9 @@ import re
 
 app = Flask(__name__)
 
-# --- 광고 API 설정 ---
 AD_ACCESS_KEY = os.environ.get("ACCESS_KEY", "")
 AD_SECRET_KEY = os.environ.get("SECRET_KEY", "")
 AD_CUSTOMER_ID = os.environ.get("CUSTOMER_ID", "")
-
-# --- 검색 API 설정 (ISBN 조회용) ---
 NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "")
 
@@ -33,6 +30,35 @@ def get_ad_header(method, uri):
         "X-Customer": str(AD_CUSTOMER_ID),
         "X-Signature": signature
     }
+
+# ✨ [신규 핵심 모듈] 네이버 쇼핑 웹페이지 직접 스크래핑 순위 추적기
+def get_real_store_rank(keyword, target_store="스터디박스"):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+    rank = "순위 밖"
+    try:
+        url = f"https://search.shopping.naver.com/search/all?query={urllib.parse.quote(keyword)}"
+        res = requests.get(url, headers=headers, timeout=5)
+        
+        # HTML 안에 스터디박스라는 단어가 아예 없으면 볼 것도 없이 순위 밖
+        if target_store in res.text:
+            # 1. HTML을 상품 블록 단위로 쪼개서 몇 번째 블록에 스터디박스가 있는지 검사
+            items = res.text.split('class="product_item__')
+            if len(items) > 1:
+                for idx, item in enumerate(items[1:], start=1):
+                    if target_store in item:
+                        return str(idx)
+                        
+            # 2. 위 방법이 안 먹히면 JSON 데이터 속성에서 순서대로 추출
+            names = re.findall(r'"mallName":"([^"]+)"', res.text)
+            for idx, name in enumerate(names, start=1):
+                if target_store in name:
+                    return str(idx)
+    except Exception as e:
+        rank = "스크래핑 실패"
+    
+    return rank
 
 def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
     search_volume = 0
@@ -67,9 +93,7 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
 
     try:
         req_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept-Language": "ko-KR,ko;q=0.9",
-            "Referer": "https://www.naver.com/"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         }
         html_res = requests.get(pc_link, headers=req_headers, timeout=5)
         soup = BeautifulSoup(html_res.text, "html.parser")
@@ -123,32 +147,23 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
     isbn = "-"
     if grade == "B (일반)" and fetch_isbn:
         try:
-            api_headers = {
-                "X-Naver-Client-Id": NAVER_CLIENT_ID,
-                "X-Naver-Client-Secret": NAVER_CLIENT_SECRET
-            }
-            
+            api_headers = {"X-Naver-Client-Id": NAVER_CLIENT_ID, "X-Naver-Client-Secret": NAVER_CLIENT_SECRET}
             api_keyword = keyword
-            if api_keyword.endswith("책") and len(api_keyword) > 1:
-                api_keyword = api_keyword[:-1]
-                
+            if api_keyword.endswith("책") and len(api_keyword) > 1: api_keyword = api_keyword[:-1]
             book_api_url = f"https://openapi.naver.com/v1/search/book.json?query={urllib.parse.quote(api_keyword)}&display=20"
             book_res = requests.get(book_api_url, headers=api_headers, timeout=5)
             
             items = []
-            if book_res.status_code == 200:
-                items = book_res.json().get('items', [])
+            if book_res.status_code == 200: items = book_res.json().get('items', [])
                 
             if not items and api_keyword != keyword:
                 book_api_url = f"https://openapi.naver.com/v1/search/book.json?query={urllib.parse.quote(keyword)}&display=20"
                 book_res = requests.get(book_api_url, headers=api_headers, timeout=5)
-                if book_res.status_code == 200:
-                    items = book_res.json().get('items', [])
+                if book_res.status_code == 200: items = book_res.json().get('items', [])
 
             for item in items:
                 isbn_raw = item.get('isbn', '')
                 isbns = isbn_raw.split()
-                
                 found_valid = False
                 for candidate in reversed(isbns):
                     if candidate.startswith('9') or candidate.startswith('8'):
@@ -156,33 +171,11 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
                         found_valid = True
                         break
                 if found_valid: break
-        except Exception as e:
+        except:
             isbn = "조회 실패"
 
-    # ✨ [핵심 추가] 500위 (5페이지) 심층 탐색 모드 작동 ✨
-    store_rank = "500위 밖"
-    try:
-        if NAVER_CLIENT_ID and NAVER_CLIENT_SECRET:
-            shop_headers = {"X-Naver-Client-Id": NAVER_CLIENT_ID, "X-Naver-Client-Secret": NAVER_CLIENT_SECRET}
-            found_rank = False
-            for start_idx in [1, 101, 201, 301, 401]:
-                shop_api_url = f"https://openapi.naver.com/v1/search/shop.json?query={urllib.parse.quote(keyword)}&display=100&start={start_idx}"
-                shop_res = requests.get(shop_api_url, headers=shop_headers, timeout=5)
-                
-                if shop_res.status_code == 200:
-                    shop_items = shop_res.json().get('items', [])
-                    for idx, item in enumerate(shop_items):
-                        if "스터디박스" in item.get('mallName', ''):
-                            store_rank = str(start_idx + idx)
-                            found_rank = True
-                            break
-                else:
-                    if start_idx == 1: store_rank = "API에러"
-                    break
-                if found_rank: break
-                time.sleep(0.1) # 네이버 차단 방지 0.1초 휴식
-    except Exception as e:
-        store_rank = "통신실패"
+    # ✨ 바보같은 API 대신, 강력한 스크래핑 함수를 실행하여 순위를 찾습니다.
+    store_rank = get_real_store_rank(keyword, "스터디박스")
 
     return {
         "keyword": keyword,
