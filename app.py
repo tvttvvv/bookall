@@ -34,7 +34,6 @@ def get_ad_header(method, uri):
         "X-Signature": signature
     }
 
-# ✨ [수정됨] min_search_volume(최소 검색량) 파라미터 추가 ✨
 def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
     search_volume = 0
     try:
@@ -64,6 +63,7 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
     grade = ""
     reason = ""
     seller_count = 0
+    shipping_fee = "-" # ✨ [신규] 배송비 기본값
 
     try:
         req_headers = {
@@ -87,6 +87,14 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
             main_text = main_pack.get_text(separator=" ", strip=True)
             match = re.search(r'(판매처|판매자|판매몰|쇼핑몰)\s*([\d,]+)', main_text)
             
+            # ✨ [핵심] 네이버 화면에서 배송비 글씨를 스마트하게 스크래핑 ✨
+            if "무료배송" in main_text or "배송비 무료" in main_text or "배송비 0원" in main_text:
+                shipping_fee = "무료"
+            else:
+                ship_match = re.search(r'배송비\s*([\d,]+)원', main_text)
+                if ship_match:
+                    shipping_fee = f"{ship_match.group(1)}원"
+            
             if match:
                 seller_word = match.group(1)
                 seller_count = int(match.group(2).replace(',', ''))
@@ -105,7 +113,6 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
                                 is_book_card_exist = True
                                 break
                 
-                # ✨ [핵심 로직] 구조상 A등급이라도, 설정한 최소 검색량을 넘지 못하면 C등급으로 강등! ✨
                 if is_book_card_exist:
                     if search_volume >= min_search_volume:
                         grade = "A (황금 🏆)"
@@ -167,7 +174,8 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
         "grade": grade,
         "reason": reason,
         "isbn": isbn,
-        "link": pc_link
+        "link": pc_link,
+        "shipping_fee": shipping_fee # ✨ [신규] 스터디박스로 진짜 배송비 데이터 전송!
     }
 
 TEMPLATE = """
@@ -201,8 +209,6 @@ TEMPLATE = """
         .grade-a { background-color: #e6f7ff; }
         .grade-c { background-color: #fcfcfc; color: #777; }
         .table-container { max-height: 600px; overflow-y: auto; margin-top: 10px; border-bottom: 1px solid #ddd; display: none; }
-        
-        /* 추가된 A등급 필터 인풋 디자인 */
         .filter-box { display: flex; align-items: center; margin-right: 15px; font-weight: bold; font-size: 14px; background: #e9ecef; padding: 5px 10px; border-radius: 5px;}
         .filter-box input { width: 60px; padding: 5px; border: 1px solid #ccc; border-radius: 4px; text-align: center; margin: 0 5px; font-weight: bold;}
     </style>
@@ -218,12 +224,10 @@ TEMPLATE = """
                 <div class="switch"><input type="checkbox" id="isbnToggle" checked><span class="slider"></span></div>
                 B등급 ISBN (켜짐)
             </label>
-            
             <div class="filter-box">
                 <label for="minVolume">A등급 최소 검색량:</label>
                 <input type="number" id="minVolume" value="0" min="0"> 이상
             </div>
-
             <select id="sortOption">
                 <option value="original">입력 순서대로 표시 (원본)</option>
                 <option value="grade">A등급 우선 정렬 (A → C → B)</option>
@@ -306,8 +310,6 @@ TEMPLATE = """
             const keywords = textarea.value.split('\\n').map(k => k.trim()).filter(k => k !== '');
             const total = keywords.length;
             const fetchIsbn = isbnToggle.checked; 
-            
-            // ✨ [신규 추가] 입력한 최소 검색량 가져오기 ✨
             const minVol = parseInt(document.getElementById('minVolume').value) || 0;
 
             if (total === 0) { alert('키워드를 입력해주세요!'); return; }
@@ -328,7 +330,6 @@ TEMPLATE = """
                 
                 let rowData = null;
                 try {
-                    // API 요청에 최소 검색량(min_search_volume) 파라미터 추가
                     const response = await fetch('/api/analyze', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -429,7 +430,6 @@ def api_analyze():
     data = request.get_json()
     keyword = data.get("keyword", "")
     fetch_isbn = data.get("fetch_isbn", False)
-    # ✨ API 요청에서 최소 검색량 값을 받아옵니다 (기본값 0) ✨
     min_search_volume = int(data.get("min_search_volume", 0))
     
     result = analyze_book(keyword, fetch_isbn=fetch_isbn, min_search_volume=min_search_volume)
