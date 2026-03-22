@@ -8,6 +8,7 @@ import base64
 import urllib.parse
 import os
 import re
+import random
 
 app = Flask(__name__)
 
@@ -22,7 +23,6 @@ def get_ad_header(method, uri):
     message = f"{timestamp}.{method}.{uri}"
     hash = hmac.new(AD_SECRET_KEY.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).digest()
     signature = base64.b64encode(hash).decode()
-    
     return {
         "Content-Type": "application/json; charset=UTF-8",
         "X-Timestamp": timestamp,
@@ -31,34 +31,46 @@ def get_ad_header(method, uri):
         "X-Signature": signature
     }
 
-# ✨ [신규 핵심 모듈] 네이버 쇼핑 웹페이지 직접 스크래핑 순위 추적기
+# ✨ [신규 하이브리드 엔진] 가짜 한국 IP + 모바일 위장 + API 백업
 def get_real_store_rank(keyword, target_store="스터디박스"):
+    # 가짜 한국 IP 생성
+    fake_ip = f"211.{random.randint(10, 250)}.{random.randint(10, 250)}.{random.randint(10, 250)}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+        "X-Forwarded-For": fake_ip,
+        "Accept-Language": "ko-KR,ko;q=0.9"
     }
-    rank = "순위 밖"
+    
+    # 1. 모바일 쇼핑 위장 스크래핑 시도
     try:
-        url = f"https://search.shopping.naver.com/search/all?query={urllib.parse.quote(keyword)}"
+        url = f"https://msearch.shopping.naver.com/search/all?query={urllib.parse.quote(keyword)}"
         res = requests.get(url, headers=headers, timeout=5)
         
-        # HTML 안에 스터디박스라는 단어가 아예 없으면 볼 것도 없이 순위 밖
-        if target_store in res.text:
-            # 1. HTML을 상품 블록 단위로 쪼개서 몇 번째 블록에 스터디박스가 있는지 검사
-            items = res.text.split('class="product_item__')
-            if len(items) > 1:
-                for idx, item in enumerate(items[1:], start=1):
-                    if target_store in item:
-                        return str(idx)
-                        
-            # 2. 위 방법이 안 먹히면 JSON 데이터 속성에서 순서대로 추출
-            names = re.findall(r'"mallName":"([^"]+)"', res.text)
-            for idx, name in enumerate(names, start=1):
-                if target_store in name:
-                    return str(idx)
-    except Exception as e:
-        rank = "스크래핑 실패"
-    
-    return rank
+        if "captcha" not in res.text.lower() and "비정상적인" not in res.text:
+            if target_store in res.text:
+                names = re.findall(r'"mallName":"([^"]+)"', res.text)
+                for idx, name in enumerate(names, start=1):
+                    if target_store in name: return str(idx)
+                return "순위 밖"
+    except Exception:
+        pass
+
+    # 2. 스크래핑이 차단당했거나 실패하면 API로 즉시 전환 (폴백)
+    try:
+        if NAVER_CLIENT_ID and NAVER_CLIENT_SECRET:
+            api_headers = {"X-Naver-Client-Id": NAVER_CLIENT_ID, "X-Naver-Client-Secret": NAVER_CLIENT_SECRET}
+            for start_idx in [1, 101]: # API는 빠르니까 200위까지만 검사
+                api_url = f"https://openapi.naver.com/v1/search/shop.json?query={urllib.parse.quote(keyword)}&display=100&start={start_idx}"
+                api_res = requests.get(api_url, headers=api_headers, timeout=5)
+                if api_res.status_code == 200:
+                    for idx, item in enumerate(api_res.json().get('items', [])):
+                        if target_store in item.get('mallName', ''):
+                            return str(start_idx + idx)
+                time.sleep(0.1)
+    except Exception:
+        return "탐색 실패"
+
+    return "순위 밖"
 
 def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
     search_volume = 0
@@ -76,13 +88,11 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
                 if api_kw.lower() == clean_keyword.lower():
                     pc = item.get('monthlyPcQcCnt', 0)
                     mo = item.get('monthlyMobileQcCnt', 0)
-                    
                     if isinstance(pc, str): pc = 0
                     if isinstance(mo, str): mo = 0
-                    
                     search_volume = pc + mo
                     break
-    except Exception as e:
+    except:
         search_volume = 0
 
     pc_link = f"https://search.naver.com/search.naver?where=nexearch&query={urllib.parse.quote(keyword)}"
@@ -92,12 +102,9 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
     shipping_fee = "-" 
 
     try:
-        req_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        }
+        req_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         html_res = requests.get(pc_link, headers=req_headers, timeout=5)
         soup = BeautifulSoup(html_res.text, "html.parser")
-        
         main_pack = soup.find(id="main_pack")
         
         if not main_pack:
@@ -110,7 +117,6 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
         else:
             main_text = main_pack.get_text(separator=" ", strip=True)
             match = re.search(r'(판매처|판매자|판매몰|쇼핑몰)\s*([\d,]+)', main_text)
-            
             if match:
                 seller_word = match.group(1)
                 seller_count = int(match.group(2).replace(',', ''))
@@ -140,7 +146,7 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
                     grade = "C (검색불가)"
                     reason = "도서 영역 없음"
 
-    except Exception as e:
+    except:
         grade = "오류"
         reason = "일시적 스크래핑 실패"
 
@@ -155,7 +161,6 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
             
             items = []
             if book_res.status_code == 200: items = book_res.json().get('items', [])
-                
             if not items and api_keyword != keyword:
                 book_api_url = f"https://openapi.naver.com/v1/search/book.json?query={urllib.parse.quote(keyword)}&display=20"
                 book_res = requests.get(book_api_url, headers=api_headers, timeout=5)
@@ -174,7 +179,6 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
         except:
             isbn = "조회 실패"
 
-    # ✨ 바보같은 API 대신, 강력한 스크래핑 함수를 실행하여 순위를 찾습니다.
     store_rank = get_real_store_rank(keyword, "스터디박스")
 
     return {
@@ -458,7 +462,7 @@ def api_analyze():
                     result['webhook_status'] = '성공!'
                 else:
                     result['webhook_status'] = f'서버 거절 ({res.status_code})'
-            except Exception as e:
+            except:
                 result['webhook_status'] = '통신 에러'
 
     return jsonify(result)
