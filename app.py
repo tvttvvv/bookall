@@ -137,7 +137,6 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
         except:
             isbn = "조회 실패"
 
-    # ✨ [순수 API 탐색] 네이버 쇼핑 API를 이용해 500위까지 샅샅이 검색!
     store_rank = "500위 밖"
     try:
         if NAVER_CLIENT_ID and NAVER_CLIENT_SECRET:
@@ -157,7 +156,7 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
                     if start_idx == 1: store_rank = "API에러"
                     break
                 if found_rank: break
-                time.sleep(0.1) # API 호출 제한 방지
+                time.sleep(0.1)
     except:
         store_rank = "탐색 실패"
 
@@ -353,6 +352,7 @@ TEMPLATE = """
             tr.setAttribute('data-index', r.original_index);
             
             const isGradeA = r.grade.includes('A');
+            const isGradeB = r.grade.includes('B');
             const isGradeC = r.grade.includes('C');
             
             if (isGradeA) tr.className = 'grade-a';
@@ -363,14 +363,17 @@ TEMPLATE = """
             let gradeColor = 'black';
             let reasonHtml = r.reason;
 
-            if (isGradeA) {
-                gradeColor = 'blue';
+            if (isGradeA) gradeColor = 'blue';
+            else if (isGradeB) gradeColor = 'green';
+            else if (isGradeC) gradeColor = '#f0ad4e'; 
+            else if (r.grade.includes('오류')) gradeColor = 'red';
+
+            // ✨ A, B, C 등급 모두 스터디박스(수신함) 전송 결과를 화면에 표시합니다!
+            if (isGradeA || isGradeB || isGradeC) {
                 let whMsg = r.webhook_status || '응답 없음';
                 let whColor = whMsg.includes('성공') ? 'green' : 'red';
                 reasonHtml += `<br><span style="color:${whColor}; font-size:0.85em; font-weight:bold;">[스터디박스 전송: ${whMsg}]</span>`;
             }
-            else if (isGradeC) gradeColor = '#f0ad4e'; 
-            else if (r.grade.includes('오류')) gradeColor = 'red';
 
             tr.innerHTML = `
                 <td>${r.keyword}</td>
@@ -395,12 +398,12 @@ TEMPLATE = """
                     if (cols[j].querySelector("a")) {
                         data = cols[j].querySelector("a").href;
                     } else {
-                        data = cols[j].innerText.replace(/"/g, '""').replace(/\n/g, " "); 
+                        data = cols[j].innerText.replace(/"/g, '""').replace(/\\n/g, " "); 
                         if (j === 5 && data !== "-" && data !== "ISBN (B등급)") data = '="' + data + '"';
                     }
                     row.push('"' + data + '"');
                 }
-                csv += row.join(",") + "\n";
+                csv += row.join(",") + "\\n";
             }
             let blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
             let link = document.createElement("a");
@@ -431,7 +434,9 @@ def api_analyze():
     result['webhook_status'] = '대기'
     
     grade = result.get("grade", "")
-    if "A" in grade:
+    
+    # ✨ 핵심 패치: A, B, C 등급 모두 웹훅(수신함)으로 전송합니다!
+    if "A" in grade or "B" in grade or "C" in grade:
         webhook_url = os.environ.get("STUDYBOX_WEBHOOK_URL", "").strip()
         if not webhook_url:
             result['webhook_status'] = '환경변수 누락 (전송불가)'
