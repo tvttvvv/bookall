@@ -9,6 +9,11 @@ import urllib.parse
 import os
 import re
 
+# 셀레니움 관련 라이브러리 추가
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+
 app = Flask(__name__)
 
 AD_ACCESS_KEY = os.environ.get("ACCESS_KEY", "")
@@ -29,6 +34,32 @@ def get_ad_header(method, uri):
         "X-Customer": str(AD_CUSTOMER_ID),
         "X-Signature": signature
     }
+
+def get_html_with_selenium(url):
+    """셀레니움을 이용해 실제 브라우저처럼 HTML을 가져오는 함수"""
+    chrome_options = Options()
+    chrome_options.add_argument("--headless") # 화면 없이 백그라운드에서 실행
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    # 실제 사람인 것처럼 속이기 위한 User-Agent 설정
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+    
+    # Dockerfile에 설정된 환경변수를 활용하여 크롬 경로 지정
+    binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium")
+    driver_path = os.environ.get("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
+    
+    chrome_options.binary_location = binary_location
+    service = Service(executable_path=driver_path)
+    
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    try:
+        driver.get(url)
+        time.sleep(1.5) # 페이지가 렌더링될 때까지 잠깐 기다림
+        html_text = driver.page_source
+    finally:
+        driver.quit() # 메모리 낭비를 막기 위해 브라우저 닫기
+        
+    return html_text
 
 def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
     search_volume = 0
@@ -59,14 +90,14 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
     seller_count = 0
     shipping_fee = "-" 
 
+    # --- 여기서부터 셀레니움을 활용하도록 변경됨 ---
     try:
-        req_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        html_res = requests.get(pc_link, headers=req_headers, timeout=5)
-        soup = BeautifulSoup(html_res.text, "html.parser")
+        html_text = get_html_with_selenium(pc_link)
+        soup = BeautifulSoup(html_text, "html.parser")
         main_pack = soup.find(id="main_pack")
         
         if not main_pack:
-            if "captcha" in html_res.text.lower() or "비정상적인" in html_res.text:
+            if "captcha" in html_text.lower() or "비정상적인" in html_text:
                 grade = "오류"
                 reason = "네이버 봇 차단 (일시적 접근 제한)"
             else:
@@ -104,9 +135,10 @@ def analyze_book(keyword, fetch_isbn=False, min_search_volume=0):
                     grade = "C (검색불가)"
                     reason = "도서 영역 없음"
 
-    except:
+    except Exception as e:
         grade = "오류"
-        reason = "일시적 스크래핑 실패"
+        reason = f"일시적 스크래핑 실패 ({str(e)[:20]})"
+    # --- 여기까지 수정됨 ---
 
     isbn = "-"
     if grade == "B (일반)" and fetch_isbn:
@@ -368,7 +400,6 @@ TEMPLATE = """
             else if (isGradeC) gradeColor = '#f0ad4e'; 
             else if (r.grade.includes('오류')) gradeColor = 'red';
 
-            // ✨ A, B, C 등급 모두 스터디박스(수신함) 전송 결과를 화면에 표시합니다!
             if (isGradeA || isGradeB || isGradeC) {
                 let whMsg = r.webhook_status || '응답 없음';
                 let whColor = whMsg.includes('성공') ? 'green' : 'red';
@@ -435,7 +466,6 @@ def api_analyze():
     
     grade = result.get("grade", "")
     
-    # ✨ 핵심 패치: A, B, C 등급 모두 웹훅(수신함)으로 전송합니다!
     if "A" in grade or "B" in grade or "C" in grade:
         webhook_url = os.environ.get("STUDYBOX_WEBHOOK_URL", "").strip()
         if not webhook_url:
